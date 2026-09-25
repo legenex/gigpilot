@@ -1,0 +1,44 @@
+{
+  "name": "gigpilot",
+  "private": true,
+  "version": "0.1.0",
+  "description": "GigPilot — agentic opportunity-to-delivery operating system. Find profitable work. Win it. Get it done.",
+  "packageManager": "pnpm@9.15.0",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "dev:web": "pnpm --filter @gigpilot/web dev",
+    "dev:app": "pnpm --filter @gigpilot/app dev",
+    "dev:worker": "pnpm --filter @gigpilot/worker dev",
+    "build": "pnpm -r --workspace-concurrency=2 build",
+    "typecheck": "pnpm -r --parallel typecheck",
+    "lint": "pnpm -r --parallel lint",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "e2e": "playwright test",
+    "db:generate": "pnpm --filter @gigpilot/db generate",
+    "db:migrate": "pnpm --filter @gigpilot/db migrate",
+    "db:seed": "pnpm --filter @gigpilot/db seed",
+    "check": "pnpm typecheck && pnpm lint && pnpm test",
+    "secrets:scan": "gitleaks detect --no-banner --redact -v"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.0",
+    "@playwright/test": "1.63.0",
+    "@types/node": "^22.19.0",
+    "eslint": "^9.39.0",
+    "globals": "^16.5.0",
+    "typescript": "5.9.3",
+    "typescript-eslint": "^8.46.0",
+    "vitest": "^4.0.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "sharp",
+      "@tailwindcss/oxide",
+      "unrs-resolver"
+    ]
+  }
+}

@@ -1,0 +1,65 @@
+# GigPilot — gx10-01 production stack (Tailscale-only internal V1).
+#
+# Conventions (see ops/gx10-01/README.md):
+#   * compose project "gigpilot"; only touch docker resources prefixed gigpilot
+#   * ports publish on 127.0.0.1 only (boot-safe); Tailscale exposure is done by
+#     the gigpilot-ts-proxy user unit which waits for the Tailscale IP
+#   * data lives in EXTERNAL volumes so `down -v` can never delete it
+#   * secrets are files under /srv/projects/gigpilot/secrets (mode 0600)
+name: gigpilot
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
+  cap_drop: [ALL]
+  restart: unless-stopped
+  logging: *logging
+
+services:
+  db:
+    image: postgres:17-bookworm
+    <<: *hardening
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    environment:
+      POSTGRES_USER: gigpilot
+      POSTGRES_DB: gigpilot
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      PGDATA: /var/lib/postgresql/data/pgdata
+    secrets: [postgres_password]
+    volumes:
+      - gigpilot_pgdata:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:4715:5432"
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gigpilot -d gigpilot"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    shm_size: 256mb
+    mem_limit: 2g
+    pids_limit: 512
+
+secrets:
+  postgres_password:
+    file: /srv/projects/gigpilot/secrets/postgres_password
+
+volumes:
+  gigpilot_pgdata:
+    external: true
+  gigpilot_storage:
+    external: true
+
+networks:
+  internal:
+    name: gigpilot_internal
+  gx_gateway:
+    external: true

@@ -1,0 +1,48 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# builds
+.next/
+out/
+dist/
+build/
+*.tsbuildinfo
+next-env.d.ts
+
+# env & secrets — never commit
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+ops/gx10-01/.env
+ops/gx10-01/*.env
+!ops/gx10-01/*.env.example
+ops/vps/.env
+ops/vps/*.env
+!ops/vps/*.env.example
+
+# runtime data (generated/private assets, db volumes, backups)
+data/
+storage/
+var/
+*.dump
+*.sql.gz
+
+# test output
+test-results/
+playwright-report/
+blob-report/
+coverage/
+e2e/.auth/
+e2e/screenshots/
+
+# logs & os
+*.log
+npm-debug.log*
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+.idea/

@@ -1,0 +1,32 @@
+{
+  "name": "@gigpilot/db",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./schema": "./src/schema.ts",
+    "./queue": "./src/queue.ts",
+    "./client": "./src/client.ts",
+    "./demo": "./src/demo.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint src",
+    "generate": "drizzle-kit generate",
+    "migrate": "tsx src/migrate.ts",
+    "seed": "tsx src/seed.ts"
+  },
+  "dependencies": {
+    "@gigpilot/config": "workspace:*",
+    "@gigpilot/contracts": "workspace:*",
+    "drizzle-orm": "^0.45.3",
+    "pg-boss": "^12.34.0",
+    "postgres": "^3.4.9",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "drizzle-kit": "^0.31.11",
+    "tsx": "^4.20.0"
+  }
+}

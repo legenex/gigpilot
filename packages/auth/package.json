@@ -1,0 +1,25 @@
+{
+  "name": "@gigpilot/auth",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/server.ts",
+    "./client": "./src/client.ts",
+    "./cookies": "./src/cookies.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint src"
+  },
+  "dependencies": {
+    "@gigpilot/config": "workspace:*",
+    "@gigpilot/contracts": "workspace:*",
+    "@gigpilot/db": "workspace:*",
+    "better-auth": "1.7.6"
+  },
+  "peerDependencies": {
+    "next": "^16.3.6",
+    "react": "^19.3.0"
+  }
+}
