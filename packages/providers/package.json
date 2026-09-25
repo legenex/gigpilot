@@ -1,12 +1,11 @@
 {
-  "name": "@gigpilot/agents",
+  "name": "@gigpilot/providers",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./commands": "./src/commands.ts",
-    "./domain/*": "./src/domain/*.ts"
+    "./storage": "./src/storage/index.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
@@ -17,8 +16,7 @@
     "@gigpilot/contracts": "workspace:*",
     "@gigpilot/db": "workspace:*",
     "@gigpilot/economics": "workspace:*",
-    "zod": "^4.6.5",
-    "@gigpilot/providers": "workspace:*",
-    "fflate": "^0.8.2"
+    "fflate": "^0.8.2",
+    "zod": "^4.6.5"
   }
 }

@@ -1,24 +1,27 @@
 {
-  "name": "@gigpilot/agents",
+  "name": "@gigpilot/worker",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "exports": {
-    ".": "./src/index.ts",
-    "./commands": "./src/commands.ts",
-    "./domain/*": "./src/domain/*.ts"
-  },
   "scripts": {
+    "dev": "tsx watch --env-file=../../.env src/index.ts",
+    "start": "node dist/index.js",
+    "build": "node build.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "eslint src"
   },
   "dependencies": {
+    "@gigpilot/agents": "workspace:*",
     "@gigpilot/config": "workspace:*",
     "@gigpilot/contracts": "workspace:*",
     "@gigpilot/db": "workspace:*",
     "@gigpilot/economics": "workspace:*",
-    "zod": "^4.6.5",
     "@gigpilot/providers": "workspace:*",
-    "fflate": "^0.8.2"
+    "pg-boss": "^12.34.0",
+    "pino": "^10.3.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "tsx": "^4.20.0"
   }
 }
