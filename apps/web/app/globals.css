@@ -1,3 +1,315 @@
 @import "tailwindcss";
 @import "@gigpilot/ui/theme.css";
 @source "../../../packages/ui/src";
+
+/*
+ * Marketing-site layer on top of the shared GigPilot tokens.
+ * Only site-specific additions live here; the palette itself comes from
+ * @gigpilot/ui/theme.css.
+ */
+
+:root {
+  /* fg-3 from the shared palette is 3.8:1 on graphite — fine for decoration,
+     too low for readable small text. Labels on the site use this instead (≈5.6:1). */
+  --site-fg-3: #878c95;
+  --site-gutter: 24px;
+  --site-max: 1240px;
+}
+
+@media (max-width: 639px) {
+  :root {
+    --site-gutter: 16px;
+  }
+}
+
+@theme inline {
+  --color-fg-muted: var(--site-fg-3);
+
+  --text-body: 16px;
+  --text-body--line-height: 26px;
+  --text-lead: 18px;
+  --text-lead--line-height: 29px;
+  --text-h3: 20px;
+  --text-h3--line-height: 27px;
+
+  --breakpoint-xs: 30rem;
+}
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+    scroll-padding-top: 80px;
+  }
+  body {
+    overflow-x: clip;
+  }
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+  }
+  p {
+    text-wrap: pretty;
+  }
+  /* Grid items default to min-width:auto, which lets nowrap/truncated text blow out a track. */
+  :where(.grid) > * {
+    min-width: 0;
+  }
+}
+
+@layer components {
+  .site-container {
+    width: 100%;
+    max-width: calc(var(--site-max) + var(--site-gutter) * 2);
+    margin-inline: auto;
+    padding-inline: var(--site-gutter);
+  }
+
+  /* Mono telemetry label: 11px, uppercase, tracked. */
+  .label {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 16px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--site-fg-3);
+  }
+
+  .display-1 {
+    font-family: var(--font-display);
+    font-weight: 600;
+    letter-spacing: -0.042em;
+    line-height: 0.98;
+    font-size: clamp(42px, 5.5vw, 76px);
+  }
+
+  .display-2 {
+    font-family: var(--font-display);
+    font-weight: 600;
+    letter-spacing: -0.034em;
+    line-height: 1.04;
+    font-size: clamp(34px, 4.1vw, 54px);
+  }
+
+  .display-3 {
+    font-family: var(--font-display);
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    line-height: 1.2;
+    font-size: 20px;
+  }
+
+  /* Calibrated tape: hairline ruler with minor/major ticks. */
+  .ruler {
+    height: 7px;
+    background-image:
+      linear-gradient(to right, var(--gp-line-bright) 1px, transparent 1px),
+      linear-gradient(to right, var(--gp-line-strong) 1px, transparent 1px);
+    background-size:
+      64px 7px,
+      8px 4px;
+    background-repeat: repeat-x;
+    background-position:
+      0 0,
+      0 0;
+  }
+
+  /* Corner crop marks for framed instruments (no boxes). */
+  .crop-marks {
+    position: relative;
+  }
+  .crop-marks::before,
+  .crop-marks::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    --c: var(--gp-line-bright);
+    --l: 14px;
+    background:
+      linear-gradient(var(--c), var(--c)) top left / var(--l) 1px no-repeat,
+      linear-gradient(var(--c), var(--c)) top left / 1px var(--l) no-repeat,
+      linear-gradient(var(--c), var(--c)) top right / var(--l) 1px no-repeat,
+      linear-gradient(var(--c), var(--c)) top right / 1px var(--l) no-repeat;
+  }
+  .crop-marks::after {
+    background:
+      linear-gradient(var(--c), var(--c)) bottom left / var(--l) 1px no-repeat,
+      linear-gradient(var(--c), var(--c)) bottom left / 1px var(--l) no-repeat,
+      linear-gradient(var(--c), var(--c)) bottom right / var(--l) 1px no-repeat,
+      linear-gradient(var(--c), var(--c)) bottom right / 1px var(--l) no-repeat;
+  }
+
+  /* App-chrome surface used for product UI slices. */
+  .product-frame {
+    background: var(--gp-bg-raised);
+    border-radius: var(--gp-r-lg);
+    box-shadow:
+      0 0 0 1px var(--gp-line-strong),
+      0 1px 0 0 rgba(255, 255, 255, 0.04) inset,
+      0 40px 80px -40px rgba(0, 0, 0, 0.9);
+  }
+
+  /* Range input restyled to the token set. --fill is set inline (0–100%). */
+  .gp-range {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 100%;
+    height: 20px;
+    background: transparent;
+    cursor: pointer;
+  }
+  .gp-range::-webkit-slider-runnable-track {
+    height: 2px;
+    background: linear-gradient(to right, var(--gp-fg-2) var(--fill, 50%), var(--gp-line-strong) var(--fill, 50%));
+  }
+  .gp-range::-moz-range-track {
+    height: 2px;
+    background: var(--gp-line-strong);
+  }
+  .gp-range::-moz-range-progress {
+    height: 2px;
+    background: var(--gp-fg-2);
+  }
+  .gp-range::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 14px;
+    height: 14px;
+    margin-top: -6px;
+    border-radius: 50%;
+    background: var(--gp-fg);
+    box-shadow:
+      0 0 0 4px var(--gp-bg-raised),
+      0 0 0 5px var(--gp-line-bright);
+    transition: box-shadow var(--gp-dur-1) ease-out;
+  }
+  .gp-range::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    border: 0;
+    border-radius: 50%;
+    background: var(--gp-fg);
+    box-shadow:
+      0 0 0 4px var(--gp-bg-raised),
+      0 0 0 5px var(--gp-line-bright);
+  }
+  .gp-range:focus-visible {
+    outline: none;
+  }
+  .gp-range:focus-visible::-webkit-slider-thumb {
+    box-shadow:
+      0 0 0 3px var(--gp-bg-raised),
+      0 0 0 5px var(--gp-accent);
+  }
+  .gp-range:focus-visible::-moz-range-thumb {
+    box-shadow:
+      0 0 0 3px var(--gp-bg-raised),
+      0 0 0 5px var(--gp-accent);
+  }
+
+  .legal h2 {
+    margin-top: 36px;
+    font-family: var(--font-display);
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    color: var(--gp-fg);
+  }
+  .legal p {
+    margin-top: 10px;
+    font-size: 16px;
+    line-height: 27px;
+    color: var(--gp-fg-2);
+  }
+
+  .focus-ring:focus-visible {
+    outline: 2px solid var(--gp-accent);
+    outline-offset: 2px;
+  }
+}
+
+@layer utilities {
+  .tnum {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum", "cv11";
+  }
+}
+
+/*
+ * Scroll-driven reveal — progressive enhancement, zero JS. Content is fully
+ * visible where view timelines are unsupported or motion is reduced.
+ */
+@keyframes site-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(18px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  @supports (animation-timeline: view()) {
+    .reveal {
+      animation: site-reveal linear both;
+      animation-timeline: view();
+      animation-range: entry 0% entry 55%;
+    }
+    .reveal-late {
+      animation: site-reveal linear both;
+      animation-timeline: view();
+      animation-range: entry 15% entry 75%;
+    }
+  }
+}
+
+@keyframes site-dash {
+  to {
+    stroke-dashoffset: -24;
+  }
+}
+@keyframes site-ticker-in {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes site-flash {
+  0% {
+    background-color: rgba(255, 107, 44, 0.1);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+@keyframes site-row-in {
+  from {
+    transform: translateY(-52px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+@keyframes gp-gate {
+  from {
+    transform: scale(1);
+    opacity: 0.9;
+  }
+  to {
+    transform: scale(2.3);
+    opacity: 0;
+  }
+}
+@keyframes site-blink {
+  50% {
+    opacity: 0.25;
+  }
+}

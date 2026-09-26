@@ -16,6 +16,8 @@ const nextConfig: NextConfig = {
   outputFileTracingRoot: root,
   turbopack: { root },
   poweredByHeader: false,
+  // The monorepo keeps one canonical AGENTS.md at the root.
+  agentRules: false,
   serverExternalPackages: ["pg-boss", "postgres"],
   async headers() {
     return [{ source: "/:path*", headers: securityHeaders }];

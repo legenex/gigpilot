@@ -1,37 +1,39 @@
-import { headers } from "next/headers";
-import { isSignedIn } from "@gigpilot/auth";
-import { Button, Logo } from "@gigpilot/ui";
-import { siteUrls } from "@/lib/site";
+import { SiteHeader } from "@/components/site/header";
+import { SiteFooter } from "@/components/site/footer";
+import { Hero } from "@/components/hero/hero";
+import { DefaultsStrip } from "@/components/sections/defaults-strip";
+import { LoopSection } from "@/components/sections/loop";
+import { RadarSection } from "@/components/sections/radar";
+import { MarketSection } from "@/components/sections/market";
+import { EconomicsSection } from "@/components/sections/economics";
+import { ProductionSection } from "@/components/sections/production";
+import { RoutingSection } from "@/components/sections/routing";
+import { SupervisionSection } from "@/components/sections/supervision";
+import { LearningSection } from "@/components/sections/learning";
+import { FinalCta } from "@/components/sections/final-cta";
 
+// Navigation and CTAs depend on the visitor's session, resolved per request on the server,
+// so the first HTML byte already carries the right state (no client-side auth flash).
 export const dynamic = "force-dynamic";
 
-export default async function Home() {
-  const urls = siteUrls();
-  const session = await isSignedIn(await headers());
+export default function Home() {
   return (
-    <main className="mx-auto max-w-6xl px-6">
-      <nav className="flex h-16 items-center justify-between">
-        <Logo />
-        <div className="flex items-center gap-2">
-          {session.signedIn ? (
-            <Button asChild variant="primary" size="sm">
-              <a href={urls.app}>Go to Dashboard</a>
-            </Button>
-          ) : (
-            <>
-              <Button asChild variant="ghost" size="sm">
-                <a href={urls.login}>Log in</a>
-              </Button>
-              <Button asChild variant="primary" size="sm">
-                <a href={urls.signup}>Sign up</a>
-              </Button>
-            </>
-          )}
-        </div>
-      </nav>
-      <section className="py-32">
-        <h1 className="font-display text-6xl font-semibold tracking-[-0.035em]">Find profitable work. Win it. Get it done.</h1>
-      </section>
-    </main>
+    <>
+      <SiteHeader />
+      <main id="main">
+        <Hero />
+        <DefaultsStrip />
+        <LoopSection />
+        <RadarSection />
+        <MarketSection />
+        <EconomicsSection />
+        <ProductionSection />
+        <RoutingSection />
+        <SupervisionSection />
+        <LearningSection />
+        <FinalCta />
+      </main>
+      <SiteFooter />
+    </>
   );
 }
