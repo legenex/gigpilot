@@ -795,7 +795,7 @@ describe("reliability repairs", () => {
     // refines the most valuable candidate first.
     const priorities = refineJobs.map((x) => Number((x.options as { priority?: number } | undefined)?.priority ?? 0));
     expect(priorities).toHaveLength(2);
-    expect(priorities[0]).toBeGreaterThan(priorities[1]);
+    expect(priorities[0]!).toBeGreaterThan(priorities[1]!);
     const skipped = pursue.filter((e) => (e.data as Record<string, unknown>).refineSkipped === "hourly cap");
     expect(skipped.map((e) => e.subjectId).sort()).toEqual(ids.slice(2).sort());
   });

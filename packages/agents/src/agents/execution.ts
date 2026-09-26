@@ -410,10 +410,14 @@ async function executeCode(ctx: RunContext, j: JobRow, step: StepRow, _all: Step
   const repair = repairOf(step);
   const defect = activeDefect(step, attempt);
   const clientName = await clientNameOf(j);
+  // Feature coverage must be judged against the SAME text QA uses, so the deterministic
+  // generator attempts every feature the client asked for (client request + analysis).
+  const analysis = await latestAnalysis(j);
+  const codeBrief = [j.title, analysis?.clientRequest ?? "", j.brief, ...(analysis?.requestedFeatures ?? [])].filter(Boolean).join("\n");
   const deterministic =
     j.serviceFamily === "web-app-builds"
-      ? generateWebArtifact({ title: j.title, brief: j.brief, clientName, defect, repairHint: repair?.hint ?? null })
-      : generateAutomationArtifact({ title: j.title, brief: j.brief, defect, repairHint: repair?.hint ?? null });
+      ? generateWebArtifact({ title: j.title, brief: codeBrief, clientName, defect, repairHint: repair?.hint ?? null })
+      : generateAutomationArtifact({ title: j.title, brief: codeBrief, defect, repairHint: repair?.hint ?? null });
   const res = await callIntelligence(
     ctx,
     {

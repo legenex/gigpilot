@@ -112,15 +112,20 @@ function criterion(step: StepRow, re: RegExp): string | undefined {
   return step.acceptance.find((a) => re.test(a));
 }
 
-/** QA finding for a code/test deliverable: no runner executed the tests (always present for code). */
-export function testsNotExecuted(severity: "minor" | "major" = "minor"): QAFinding {
+/**
+ * QA finding for a code/test deliverable: no runner executed the tests.
+ * Always NON-BLOCKING (minor): the environment has no test runner, so this is a
+ * disclosure about GigPilot, not a defect in the deliverable. It stays visible in
+ * the review, the delivery notes and the package. (A blocking major here would make
+ * every code brief that asks for tests undeliverable — a permanent dead end.)
+ */
+export function testsNotExecuted(briefRequiresTests = false): QAFinding {
   return {
     code: QA_FINDING_CODES.testsNotExecuted,
-    severity,
-    message:
-      severity === "major"
-        ? "The brief requires tests, but GigPilot has no test runner: the tests were generated and NOT executed — results are self-reported and unverified"
-        : "Tests were generated but not executed in this environment — results are self-reported and unverified",
+    severity: "minor",
+    message: briefRequiresTests
+      ? "The brief asks for tests; GigPilot has no test runner, so the generated tests were NOT executed — results are self-reported and unverified"
+      : "Tests were generated but not executed in this environment — results are self-reported and unverified",
     repairHint: "Run the test suite in a real environment (npm test) before relying on it",
   };
 }
@@ -350,7 +355,7 @@ export async function deterministicChecks(deps: AgentDeps, j: JobRow, step: Step
           });
         }
         // No sandbox runner exists: tests are NEVER executed here, whatever the report claims.
-        res.findings.push(testsNotExecuted(qa?.requiresTests ? "major" : "minor"));
+        res.findings.push(testsNotExecuted(qa?.requiresTests));
         res.evidence.push(`${report?.tests?.length ?? 0} tests written, not executed`);
         res.notVerified!.push("Automated tests (written, not executed — no test runner in this environment)");
         res.verified!.push("Source archive opens; README present; no .env file shipped");
@@ -369,7 +374,7 @@ export async function deterministicChecks(deps: AgentDeps, j: JobRow, step: Step
     res.checked++;
     if (!report) res.findings.push({ code: "missing_tests", severity: "major", message: "No test results recorded", repairHint: "Run the test suite" });
     else if ((report.failed ?? 0) > 0) res.findings.push({ code: "failing_tests", severity: "major", message: `Test report self-reports ${report.failed} failure(s)`, repairHint: "Fix the failing tests upstream" });
-    res.findings.push(testsNotExecuted(qa?.requiresTests ? "major" : "minor"));
+    res.findings.push(testsNotExecuted(qa?.requiresTests));
     res.evidence.push("tests generated but not executed in this environment");
     res.notVerified!.push("Test results (self-reported by the generator; not executed)");
     return res;

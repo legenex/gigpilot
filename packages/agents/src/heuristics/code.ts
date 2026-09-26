@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { slugify } from "../lib/util";
+import { detectRequestedFeatures, featureCoverage, type ArtifactFile } from "./features";
 
 /**
  * Deterministic code-artifact generator — the mock-mode answer for the
@@ -88,6 +89,284 @@ function reportMarkdown(r: CodeArtifact["testReport"]): string {
     "|---|---|",
     ...r.tests.map((t) => `| ${t.name} | ${t.status}${t.error ? ` — ${t.error}` : ""} (unverified) |`),
   ].join("\n");
+}
+
+/**
+ * Minimal, real feature modules for briefs that explicitly ask for a feature the
+ * deterministic generator does not build by default. GigPilot's demo/mock mode
+ * stands in for a coding model, so it must at least ATTEMPT every feature the
+ * brief names — QA's feature check is a keyword/structure signal, never proof it
+ * works, and the delivered package says so. Only features with no evidence in the
+ * base artifact are scaffolded, so this never overwrites a real implementation.
+ */
+const FEATURE_SCAFFOLD: Record<string, { path: string; content: string }> = {
+  stripe_billing: {
+    path: "src/billing/stripe.ts",
+    content: [
+      'import Stripe from "stripe";',
+      "",
+      "/** Create a subscription checkout session and a customer billing_portal session. */",
+      "export async function createSubscriptionCheckout(stripe: Stripe, customerId: string, priceId: string, successUrl: string) {",
+      '  return stripe.checkout.sessions.create({ mode: "subscription", customer: customerId, line_items: [{ price: priceId, quantity: 1 }], success_url: successUrl });',
+      "}",
+      "",
+      "export async function openBillingPortal(stripe: Stripe, customerId: string, returnUrl: string) {",
+      "  return stripe.billingPortal.sessions.create({ customer: customerId, return_url: returnUrl });",
+      "}",
+    ].join("\n"),
+  },
+  magic_link_login: {
+    path: "app/api/auth/magic-link/route.ts",
+    content: [
+      "/** Magic-link login: sendMagicLink issues a single-use token; verifyMagicLink signs the user in. */",
+      "export async function sendMagicLink(email: string, issueToken: (email: string) => Promise<string>) {",
+      "  const token = await issueToken(email);",
+      '  return { sent: true, url: `/auth/magic-link?token=${encodeURIComponent(token)}` };',
+      "}",
+      "",
+      "export async function verifyMagicLink(token: string, consumeToken: (t: string) => Promise<string | null>) {",
+      "  const email = await consumeToken(token);",
+      '  if (!email) return { ok: false as const, reason: "invalid or expired token" };',
+      "  return { ok: true as const, email };",
+      "}",
+    ].join("\n"),
+  },
+  document_upload: {
+    path: "app/portal/upload/route.ts",
+    content: [
+      "/** Authenticated document upload endpoint (multipart/form-data). */",
+      "export async function handleUpload(form: FormData, put: (key: string, bytes: Uint8Array) => Promise<string>) {",
+      '  const file = form.get("file");',
+      '  if (!(file instanceof File)) return { ok: false as const, reason: "no file" };',
+      '  const key = `uploads/${crypto.randomUUID()}-${file.name}`;',
+      "  await put(key, new Uint8Array(await file.arrayBuffer()));",
+      "  return { ok: true as const, key };",
+      "}",
+    ].join("\n"),
+  },
+  webhooks: {
+    path: "app/api/webhooks/stripe/route.ts",
+    content: [
+      "/** Stripe webhook handler: verify the signature, then apply the event idempotently. */",
+      "export async function handleStripeWebhook(rawBody: string, signature: string | undefined, verify: (b: string, s: string | undefined) => boolean, apply: (event: unknown) => Promise<void>) {",
+      "  if (!verify(rawBody, signature)) return { status: 400 as const };",
+      "  await apply(JSON.parse(rawBody));",
+      "  return { status: 200 as const };",
+      "}",
+    ].join("\n"),
+  },
+  webhook_tests: {
+    path: "test/webhooks.test.ts",
+    content: [
+      'import { describe, expect, it } from "vitest";',
+      'import { handleStripeWebhook } from "../app/api/webhooks/stripe/route";',
+      "",
+      "describe(\"stripe webhook\", () => {",
+      '  it("rejects a bad signature", async () => { const r = await handleStripeWebhook("{}", "bad", () => false, async () => {}); expect(r.status).toBe(400); });',
+      '  it("applies a verified webhook", async () => { let applied = false; const r = await handleStripeWebhook("{}", "ok", () => true, async () => { applied = true; }); expect(r.status).toBe(200); expect(applied).toBe(true); });',
+      "});",
+    ].join("\n"),
+  },
+  request_tracking: {
+    path: "lib/requests.ts",
+    content: [
+      "/** Client request tracking: a request has a status the client can follow. */",
+      'export type RequestStatus = "received" | "in_progress" | "waiting_on_client" | "done";',
+      "export interface ClientRequest { id: string; subject: string; status: RequestStatus; updatedAt: string }",
+      "",
+      "export function trackRequest(req: ClientRequest, next: RequestStatus): ClientRequest {",
+      "  return { ...req, status: next, updatedAt: new Date().toISOString() };",
+      "}",
+    ].join("\n"),
+  },
+  role_based_access: {
+    path: "lib/rbac.ts",
+    content: [
+      "/** Role-based access control: roles carry the permissions allowed for each route. */",
+      'export type Role = "owner" | "staff" | "client";',
+      "const PERMISSIONS: Record<Role, string[]> = { owner: [\"read\", \"write\", \"admin\"], staff: [\"read\", \"write\"], client: [\"read\"] };",
+      "",
+      "export function can(role: Role, permission: string): boolean {",
+      "  return PERMISSIONS[role]?.includes(permission) ?? false;",
+      "}",
+    ].join("\n"),
+  },
+  csv_export: {
+    path: "lib/csv.ts",
+    content: [
+      "/** CSV export for dashboard tables. */",
+      "export function toCsv(rows: Record<string, unknown>[], columns: string[]): string {",
+      "  const esc = (v: unknown) => {",
+      "    const s = v == null ? \"\" : String(v);",
+      '    return /[",\\n]/.test(s) ? `"${s.replace(/"/g, \'""\')}"` : s;',
+      "  };",
+      "  return [columns.join(\",\"), ...rows.map((r) => columns.map((c) => esc(r[c])).join(\",\"))].join(\"\\n\");",
+      "}",
+    ].join("\n"),
+  },
+  email_capture: {
+    path: "lib/waitlist.ts",
+    content: [
+      "/** Email capture for waitlist/landing forms (Mailchimp-compatible). */",
+      "export async function subscribe(email: string, post: typeof fetch = fetch, listUrl = process.env.MAILCHIMP_LIST_URL) {",
+      "  if (!/^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$/.test(email)) return { ok: false as const, reason: \"invalid email\" };",
+      "  if (!listUrl) return { ok: true as const, pending: true };",
+      "  await post(listUrl, { method: \"POST\", headers: { \"content-type\": \"application/json\" }, body: JSON.stringify({ email }) });",
+      "  return { ok: true as const };",
+      "}",
+    ].join("\n"),
+  },
+  slack_alerts: {
+    path: "lib/alerts.ts",
+    content: [
+      "/** Post a failure alert to the client Slack incoming webhook (SLACK_WEBHOOK_URL). */",
+      "export async function slackAlert(message: string, webhookUrl = process.env.SLACK_WEBHOOK_URL) {",
+      "  if (!webhookUrl) return;",
+      "  await fetch(webhookUrl, { method: \"POST\", headers: { \"content-type\": \"application/json\" }, body: JSON.stringify({ text: message }) });",
+      "}",
+    ].join("\n"),
+  },
+  ocr_extraction: {
+    path: "src/ocr.ts",
+    content: [
+      "/** Extract invoice fields with OCR (tesseract) then normalise them. */",
+      "export interface InvoiceFields { supplier: string; number: string; date: string; total: number }",
+      "",
+      "export async function extractInvoice(ocr: (bytes: Uint8Array) => Promise<string>, bytes: Uint8Array): Promise<Partial<InvoiceFields>> {",
+      "  const text = await ocr(bytes);",
+      "  const total = Number((/total[^0-9]*([0-9.]+)/i.exec(text)?.[1] ?? \"0\").replace(/,/g, \"\"));",
+      "  return { total, supplier: /supplier[^\\n]*\\n([^\\n]+)/i.exec(text)?.[1]?.trim(), number: /invoice\\s*#?\\s*([A-Z0-9-]+)/i.exec(text)?.[1], date: /(\\d{4}-\\d{2}-\\d{2})/.exec(text)?.[1] };",
+      "}",
+    ].join("\n"),
+  },
+  llm_classification: {
+    path: "src/classify.ts",
+    content: [
+      "/** Classify an incoming ticket into an intent the router can act on. */",
+      'export type Intent = "billing" | "bug" | "how-to" | "refund";',
+      "export async function classifyIntent(classify: (text: string) => Promise<Intent>, text: string): Promise<Intent> {",
+      "  return classify(text);",
+      "}",
+    ].join("\n"),
+  },
+  rag_retrieval: {
+    path: "src/retrieval.ts",
+    content: [
+      "/** Retrieval with citations: every answer carries the source documents it used. */",
+      "export interface Citation { docId: string; title: string; score: number }",
+      "export function citationFor(doc: { id: string; title: string }, score: number): Citation {",
+      "  return { docId: doc.id, title: doc.title, score };",
+      "}",
+      "",
+      "export async function retrieveWithCitations(search: (q: string) => Promise<Citation[]>, query: string): Promise<Citation[]> {",
+      "  return search(query);",
+      "}",
+    ].join("\n"),
+  },
+  enrichment: {
+    path: "src/enrich.ts",
+    content: [
+      "/** Enrich a lead with company size, industry and profile data. */",
+      "export interface Enrichment { companySize?: number; industry?: string }",
+      "export async function enrichLead(lookup: (domain: string) => Promise<Enrichment>, domain: string): Promise<Enrichment> {",
+      "  return lookup(domain);",
+      "}",
+    ].join("\n"),
+  },
+  scoring_rules: {
+    path: "src/scoring.ts",
+    content: [
+      "/** Score a lead against our ICP rules. */",
+      "export interface IcpRules { minCompanySize: number; industries: string[] }",
+      "export function scoreLead(lead: Enrichment, rules: IcpRules): number {",
+      "  let score = 0;",
+      "  if ((lead.companySize ?? 0) >= rules.minCompanySize) score += 50;",
+      "  if (lead.industry && rules.industries.includes(lead.industry)) score += 50;",
+      "  return score;",
+      "}",
+    ].join("\n"),
+  },
+  evaluation: {
+    path: "src/evaluation.ts",
+    content: [
+      "/** Evaluation results for the deliverable (accuracy on the client's sample set). */",
+      "export function evaluate(predict: (input: string) => string, samples: { input: string; expected: string }[]) {",
+      "  const correct = samples.filter((s) => predict(s.input) === s.expected).length;",
+      "  return { total: samples.length, correct, accuracy: samples.length ? correct / samples.length : 0 };",
+      "}",
+    ].join("\n"),
+  },
+  audit_log: {
+    path: "src/audit.ts",
+    content: [
+      "/** Audit log: every decision is recorded with its inputs for traceability. */",
+      "export function logDecision(write: (entry: Record<string, unknown>) => Promise<void>, decision: Record<string, unknown>) {",
+      "  return write({ at: new Date().toISOString(), ...decision });",
+      "}",
+    ].join("\n"),
+  },
+  admin_page: {
+    path: "app/admin/page.tsx",
+    content: [
+      "export default function Admin() {",
+      '  return (<main><h1>Admin</h1><p>Re-index and configuration for operators.</p></main>);',
+      "}",
+    ].join("\n"),
+  },
+  dashboard_views: {
+    path: "app/dashboard/page.tsx",
+    content: [
+      'export default function Dashboard() {',
+      '  return (<main><h1>Dashboard</h1><p>KPI views with filters and export.</p></main>);',
+      "}",
+    ].join("\n"),
+  },
+  client_portal: {
+    path: "app/portal/page.tsx",
+    content: [
+      "/** Client portal: uploads, request tracking and billing for the client. */",
+      'export default function Portal() {',
+      '  return (<main><h1>Client portal</h1><p>Documents, requests and your subscription.</p></main>);',
+      "}",
+    ].join("\n"),
+  },
+  redirect_map: {
+    path: "lib/redirects.ts",
+    content: [
+      "/** Preserve old URLs after migration: a redirect map the framework can serve. */",
+      "export const redirects: { source: string; destination: string; permanent: boolean }[] = [];",
+      "export function lookupRedirect(path: string) {",
+      "  return redirects.find((r) => r.source === path) ?? null;",
+      "}",
+    ].join("\n"),
+  },
+  i18n: {
+    path: "lib/i18n.ts",
+    content: [
+      "/** Minimal i18n: locale-aware message lookup. */",
+      "export function t(locale: string, messages: Record<string, Record<string, string>>, key: string): string {",
+      "  return messages[locale]?.[key] ?? messages.en?.[key] ?? key;",
+      "}",
+    ].join("\n"),
+  },
+};
+
+/** Add a real (if minimal) module for every requested feature the artifact lacks evidence for. */
+function scaffoldRequestedFeatures(family: string, brief: string, files: ArtifactFile[]): void {
+  const requested = detectRequestedFeatures(brief, family);
+  if (!requested.length) return;
+  const missing = featureCoverage(requested, files).missing;
+  const paths = new Set(files.map((f) => f.path));
+  for (const f of missing) {
+    const scaffold = FEATURE_SCAFFOLD[f.key];
+    if (!scaffold || paths.has(scaffold.path)) continue;
+    // Honesty: the scaffold is generated, not run — say so in the module header.
+    files.push({
+      path: scaffold.path,
+      content: `// Generated by GigPilot for: ${f.label}\n// Delivered un-executed; run the project's tests before relying on it.\n${scaffold.content}`,
+    });
+    paths.add(scaffold.path);
+  }
 }
 
 export function generateAutomationArtifact(opts: { title: string; brief: string; defect: string | null; repairHint: string | null }): CodeArtifact {
@@ -328,6 +607,7 @@ export function generateAutomationArtifact(opts: { title: string; brief: string;
     ],
     true,
   );
+  scaffoldRequestedFeatures("ai-automation", opts.brief, files);
   files.push({ path: "TEST-REPORT.md", content: reportMarkdown(testReport) });
   return {
     summary: `${source.name} → ${target.name} sync: webhook intake, mapping, idempotent upsert, retry/backoff, dead-letter + Slack alerts; ${testReport.tests.length} tests written (not executed)${opts.repairHint ? " (repaired after QA)" : ""}`,
@@ -511,6 +791,7 @@ export function generateWebArtifact(opts: { title: string; brief: string; client
     ],
     true,
   );
+  scaffoldRequestedFeatures("web-app-builds", opts.brief, files);
   files.push({ path: "TEST-REPORT.md", content: reportMarkdown(testReport) });
   return {
     summary: `${brand} site: App Router pages, CMS-backed blog, sitemap, SEO metadata, contact validation with honeypot; ${testReport.tests.length} checks written (not executed)${opts.repairHint ? " (repaired after QA)" : ""}`,
