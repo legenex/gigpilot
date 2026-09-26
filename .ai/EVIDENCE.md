@@ -22,3 +22,8 @@
 | E2E auth + smoke suites (live, post-repair) | PASS 9/9 | protected routes, API 401s, sign-up/logout/login, wrong password, SSR CTA both states, health, console-clean site, all pages render, no mobile overflow |
 | **E2E required demo flow §35 (live)** | **PASS** (13.4 min) | logged-out nav → signup → Go to Dashboard → radar → gates pass → approve pursuit → proposal → approve → award → job → DAG → QA fail → repair → QA pass → final approval → zip download → ledger estimate+actual → agents/events history |
 | Independent product review | FAIL → repairs in progress | hollow verification, triage-only pursue, unlabelled sample data, duplicate batches, inert allocation |
+| Restart: worker process exit (SIGTERM to PID 1 in-container) | PASS | graceful shutdown → Docker auto-restart (RestartCount 1) → healthy in ~1 s |
+| Restart: worker hard kill (docker kill) | PASS (by design) | Docker treats `docker kill` as a manual stop (no auto-restart); `docker start` → healthy; queued work completed; orphaned active job recovered by pg-boss expiry/retry |
+| Restart: PostgreSQL restart under load | PASS | app + worker reconnected automatically within 10 s |
+| Restart: full stack `compose restart` | PASS | all 5 services healthy in ~30 s; Tailscale edge 200; auth+smoke E2E 9/9 after restart |
+| Reboot persistence prerequisites | VERIFIED (reboot not executed — shared host) | linger=yes; containers `restart: unless-stopped` incl. edge (retries until Tailscale IP exists); backup timer enabled; docker enabled |

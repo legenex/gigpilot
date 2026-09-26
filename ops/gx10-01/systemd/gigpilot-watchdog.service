@@ -1,0 +1,7 @@
+[Unit]
+Description=GigPilot watchdog (restart unhealthy containers, raise alerts)
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/share/gigpilot/bin/watchdog.sh

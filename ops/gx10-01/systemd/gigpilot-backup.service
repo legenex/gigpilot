@@ -1,5 +1,6 @@
 [Unit]
 Description=GigPilot database + storage backup
+OnFailure=gigpilot-alert@%n.service
 After=docker.service
 
 [Service]

@@ -1,0 +1,6 @@
+[Unit]
+Description=Record GigPilot unit failure (%i)
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/share/gigpilot/bin/alert.sh %i

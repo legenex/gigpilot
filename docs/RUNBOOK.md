@@ -4,7 +4,7 @@ All commands run on gx10-01 from the repo root (`~/Documents/Projects/GigSmith`)
 `DC` below is shorthand for:
 
 ```bash
-DC="docker compose -p gigpilot -f ops/gx10-01/compose.yml --env-file /srv/projects/gigpilot/release.env"
+DC="docker compose -p gigpilot -f /srv/projects/gigpilot/current/compose.yml --env-file /srv/projects/gigpilot/release.env"
 ```
 
 ## Health
@@ -28,18 +28,33 @@ SKIP_BUILD=1 GIGPILOT_TAG=gigpilot:<old-tag> ops/gx10-01/scripts/deploy.sh   # m
 cat /srv/projects/gigpilot/notes/releases.log
 ```
 
-Deploys take a pre-deploy backup, run migrations as a one-shot service, wait for health
-checks, smoke-test all three services and roll back automatically on failure.
+Deploys take a verified pre-deploy backup (and abort if it fails), snapshot the ops config
+into `/srv/projects/gigpilot/releases/<tag>` (`current` → the live one), re-apply the
+least-privilege DB role, run migrations as a one-shot service, wait for health checks,
+smoke-test web/app/worker and the Tailscale edge, and on failure roll back to the previous
+release's image **and** config snapshot, smoke-check the rollback and log
+`ROLLBACK_FAILED` if it didn't recover. Migrations must stay expand-only (old image keeps
+working against the new schema). Old GigPilot images are pruned (current + previous + 2).
 
 ## Restart & recovery
 
 - Containers (including the Caddy `edge` on the Tailscale IP) use `restart: unless-stopped`,
   so everything returns after a reboot; the edge keeps retrying until Tailscale is up.
-- Restart one service: `$DC restart worker`. Background jobs are durable in Postgres
+- Restart one service: `$DC restart worker`. **Never `restart` the whole project** — it
+  re-runs the one-shot `migrate` while the database is restarting; use `$DC up -d` instead. Background jobs are durable in Postgres
   (pg-boss): in-flight jobs expire and retry per queue policy; failed attempts remain in
   `agent_run` history.
 - If the Tailscale IP changes, update `WEB_URL`/`APP_URL` in
   `/srv/projects/gigpilot/config/gigpilot.env` and `$DC up -d`.
+
+## Watchdog & alerts
+
+`gigpilot-watchdog.timer` (every 3 min) checks worker `/readyz` and app/web health; after 3
+consecutive failures it restarts that container. Failures, restarts and failed units
+(backup via `OnFailure=`) are written to `/srv/projects/gigpilot/status/alerts.log` and the
+user journal (`journalctl --user -t gigpilot-watchdog -t gigpilot-alert -p err`). Check
+this file first in the morning. The worker also exits by itself when it has been unready
+for more than 10 minutes, so Docker restarts it.
 
 ## Logs
 
@@ -53,8 +68,12 @@ $DC logs -f --tail=200 app
 - Nightly `gigpilot-backup.timer` (03:05) → `/srv/projects/gigpilot/backups/`
   (pg_dump custom format + storage tarball, 14 kept), then gx-backup's restic snapshot
   (03:30) copies `/srv/projects` encrypted to local + gx10-02 repositories.
-- Manual: `ops/gx10-01/scripts/backup.sh`
-- Restore: `ops/gx10-01/scripts/restore.sh <dump> --yes-replace-database`
+- Manual: `ops/gx10-01/scripts/backup.sh` (nightly retention) or `--label <name>`; every dump
+  is verified with `pg_restore --list`; the script exits non-zero if anything is skipped.
+- Restore (stops the apps, restores in one transaction, re-applies the runtime role and
+  pg-boss ownership, optionally replaces the storage volume, restarts, smoke-checks):
+  `ops/gx10-01/scripts/restore.sh <db.dump> [--storage <storage.tgz>] --yes-replace-database`
+  (a `prerestore` safety backup is taken first). Rehearse quarterly.
 
 ## Credentials
 
@@ -79,6 +98,8 @@ or server-wide as a secret file + env var. Never paste keys into chat, commits o
   own keys under Integrations. The local GX gateway key is the one shareable credential
   (quota-limited per workspace per day). List only accounts that already exist — the first
   sign-up with an address owns it. A startup warning is logged for listed addresses with no account.
+  **Procedure:** sign up with your own address first, then set `OPERATOR_EMAILS=<that address>`
+  in the config file and run `$DC up -d app worker`. (It is intentionally empty until then.)
 - Non-operator workspaces can never set a daily paid limit above `TENANT_MAX_DAILY_PAID_USD`
   (default 0); operators are capped by `PAID_PROVIDER_DAILY_BUDGET_USD`.
 - `SIGNUP_MODE=invite` accepts exact addresses from `AUTH_ALLOWED_EMAILS`; `@domain` entries need

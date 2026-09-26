@@ -31,7 +31,8 @@ Verified free on 2026-09-26 (`ss -tlnp`); nothing else on the host uses 47xx.
 - **`edge`** (Caddy, host networking) binds only the Tailscale IPv4 on 4710/4711 and proxies to the loopback ports. It overwrites `X-Forwarded-For` with the real tailnet peer address (no trusted proxies), so per-IP auth rate limits cannot be spoofed, and never buffers the SSE stream. If Tailscale is not up at boot the bind fails and Docker's restart policy retries until it is.
 - The apps connect to Postgres as **`gigpilot_app`** (non-superuser: data access on app tables, owner of the pg-boss schema only). Migrations run as the owner role `gigpilot`. `sql/app-role.sql` is applied idempotently by every deploy.
 - Image: `gigpilot:<sha12>[-dirty]-<ts>` built from `ops/docker/Dockerfile` (one image, role chosen by command).
-- Runtime dir `/srv/projects/gigpilot` (0700): `secrets/` (generated, never committed), `config/gigpilot.env` (non-secret), `backups/`, `notes/` (releases/backups logs), `status/agentos.json` (worker snapshot for AgentOS), `release.env` (current image tag).
+- Runtime dir `/srv/projects/gigpilot` (0700): `secrets/` (generated, never committed), `config/gigpilot.env` (non-secret), `backups/`, `notes/` (releases/backups logs), `status/` (`agentos.json` worker snapshot, `alerts.log`, watchdog state), `releases/<tag>/` (per-release ops config snapshot; `current` symlink), `release.env` (current image tag + release dir).
+- systemd user units: `gigpilot-backup.timer` (03:05 nightly, `OnFailure=` alert), `gigpilot-watchdog.timer` (every 3 min: restart unhealthy containers + alerts).
 - External volumes `gigpilot_pgdata`, `gigpilot_storage` (a `down -v` cannot delete data).
 - Networks: `gigpilot_internal` (db) and external `gx_gateway` (worker/app reach GX at `http://gx-litellm:4000/v1`).
 - systemd **user** unit (linger is enabled): `gigpilot-backup.timer` (03:05 nightly, before gx-backup's 03:30 restic snapshot). (The earlier socat `gigpilot-ts-proxy@` units were replaced by the `edge` service; deploy/install disable them.)
@@ -45,10 +46,11 @@ Containers: `restart: unless-stopped`, health checks on every service, read-only
 ops/gx10-01/scripts/install-host.sh      # idempotent host setup (dirs, secrets, config, units)
 ops/gx10-01/scripts/deploy.sh            # build + migrate + up --wait + smoke + auto-rollback
 SKIP_BUILD=1 GIGPILOT_TAG=gigpilot:<tag> ops/gx10-01/scripts/deploy.sh   # redeploy an existing image
-docker compose -p gigpilot -f ops/gx10-01/compose.yml --env-file /srv/projects/gigpilot/release.env ps
-docker compose -p gigpilot -f ops/gx10-01/compose.yml --env-file /srv/projects/gigpilot/release.env logs -f worker
+docker compose -p gigpilot -f /srv/projects/gigpilot/current/compose.yml --env-file /srv/projects/gigpilot/release.env ps
+docker compose -p gigpilot -f /srv/projects/gigpilot/current/compose.yml --env-file /srv/projects/gigpilot/release.env logs -f worker
+cat /srv/projects/gigpilot/status/alerts.log      # watchdog / failed-unit alerts
 ops/gx10-01/scripts/backup.sh            # manual backup (db dump + storage tarball)
-ops/gx10-01/scripts/restore.sh <dump> --yes-replace-database
+ops/gx10-01/scripts/restore.sh <db.dump> [--storage <storage.tgz>] --yes-replace-database
 ops/gx10-01/scripts/purge-test-accounts.sh [--yes]   # remove example.com / gigpilot.dev test accounts
 curl -s http://127.0.0.1:4712/readyz
 ```

@@ -40,3 +40,11 @@
   deployed 2e29627. Purged 9 test/audit accounts from prod.
 - Live GX pipeline verified on a real coding job: QA fail (failing retry test) → Recovery regenerate →
   independent QA pass (gx-code) → delivery prepared.
+- 2796d73: required demo flow E2E PASSES end-to-end on live stack (13.4 min, real local inference).
+- Restart/recovery tests passed (worker exit → auto-restart; Postgres restart → reconnect 10 s;
+  full compose restart → healthy 30 s; auth+smoke 9/9 afterwards).
+- Independent product review: FAIL (hollow code verification, QA ignoring critical findings, triage-
+  only pursue, unlabelled sample data, duplicate batch assets, inert allocation, routes priced vs run).
+- Independent design review: FAIL (dashboard mobile tables, desktop clipping, number contradictions,
+  stream garble, focus rings, plumbing leaks, integrations card stack, brand chip mismatch). Site close.
+- Repair wave 2 launched: backend integrity engineer, dashboard engineer, website engineer; ops review running.

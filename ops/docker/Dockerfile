@@ -37,6 +37,9 @@ RUN --mount=type=cache,id=gigpilot-pnpm,target=/pnpm/store \
 
 # --- build ------------------------------------------------------------------
 FROM deps AS build
+ARG GIT_SHA=unknown
+# Inlined into the worker bundle at build time (supervision/status version).
+ENV GIGPILOT_VERSION=${GIT_SHA}
 COPY . .
 # Build-time placeholders only; real values are injected at runtime.
 ENV DATABASE_URL=postgres://build:build@127.0.0.1:5432/build \

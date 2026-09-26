@@ -25,7 +25,7 @@ x-hardening: &hardening
 
 x-node: &node
   <<: *hardening
-  image: ${GIGPILOT_IMAGE:-gigpilot:latest}
+  image: ${GIGPILOT_IMAGE:?set GIGPILOT_IMAGE (see scripts/deploy.sh / release.env)}
   user: "10001:10001"
   read_only: true
   env_file:
@@ -73,7 +73,7 @@ services:
 
   migrate:
     <<: *hardening
-    image: ${GIGPILOT_IMAGE:-gigpilot:latest}
+    image: ${GIGPILOT_IMAGE:?set GIGPILOT_IMAGE (see scripts/deploy.sh / release.env)}
     user: "10001:10001"
     read_only: true
     restart: "no"
@@ -125,6 +125,9 @@ services:
       POSTGRES_USER: gigpilot_app
       GIGPILOT_SERVICE: app
       STORAGE_ROOT: /data/storage
+      # The app only needs GX for zero-cost connection tests; keep it off the shared
+      # gx_gateway network (reachable by other stacks' containers, bypassing the edge).
+      GX_BASE_URL: http://${GIGPILOT_TS_IP:-100.105.214.61}:4000/v1
       DATABASE_POOL_MAX: "8"
     secrets:
       - source: postgres_app_password
@@ -138,7 +141,7 @@ services:
       - gigpilot_storage:/data/storage
     ports:
       - "127.0.0.1:4711:3000"
-    networks: [internal, gx_gateway]
+    networks: [internal]
     tmpfs:
       - /tmp:size=256m,mode=1777
       - /app/app/apps/app/.next/cache:size=256m,uid=10001,gid=10001

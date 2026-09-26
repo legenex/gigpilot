@@ -64,12 +64,17 @@ docker volume inspect gigpilot_pgdata >/dev/null 2>&1 || docker volume create gi
 docker volume inspect gigpilot_storage >/dev/null 2>&1 || docker volume create gigpilot_storage >/dev/null
 
 install -m 0755 "$REPO/ops/gx10-01/scripts/backup.sh" "$SHARE/bin/backup.sh"
+install -m 0755 "$REPO/ops/gx10-01/bin/watchdog.sh" "$SHARE/bin/watchdog.sh"
+install -m 0755 "$REPO/ops/gx10-01/bin/alert.sh" "$SHARE/bin/alert.sh"
 install -m 0644 "$REPO/ops/gx10-01/systemd/gigpilot-backup.service" "$UNITS/"
 install -m 0644 "$REPO/ops/gx10-01/systemd/gigpilot-backup.timer" "$UNITS/"
+install -m 0644 "$REPO/ops/gx10-01/systemd/gigpilot-watchdog.service" "$UNITS/"
+install -m 0644 "$REPO/ops/gx10-01/systemd/gigpilot-watchdog.timer" "$UNITS/"
+install -m 0644 "$REPO/ops/gx10-01/systemd/gigpilot-alert@.service" "$UNITS/"
 systemctl --user daemon-reload
 # Tailscale exposure is the compose `edge` service (Caddy); retire legacy socat units.
 for u in gigpilot-ts-proxy@4710 gigpilot-ts-proxy@4711; do systemctl --user disable --now "$u" >/dev/null 2>&1 || true; done
 rm -f "$UNITS/gigpilot-ts-proxy@.service" "$SHARE/bin/ts-proxy.sh"
 systemctl --user daemon-reload
-systemctl --user enable --now gigpilot-backup.timer
+systemctl --user enable --now gigpilot-backup.timer gigpilot-watchdog.timer
 echo "host setup complete"

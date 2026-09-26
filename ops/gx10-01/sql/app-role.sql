@@ -10,6 +10,10 @@ BEGIN
 END $$;
 ALTER ROLE gigpilot_app WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD :'app_password';
 GRANT CONNECT ON DATABASE gigpilot TO gigpilot_app;
+-- Guardrails against runaway queries / abandoned transactions holding locks.
+ALTER ROLE gigpilot_app SET statement_timeout = '120s';
+ALTER ROLE gigpilot_app SET lock_timeout = '30s';
+ALTER ROLE gigpilot_app SET idle_in_transaction_session_timeout = '5min';
 
 -- Application tables: data access only (no DDL).
 GRANT USAGE ON SCHEMA public TO gigpilot_app;
