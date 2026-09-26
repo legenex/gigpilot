@@ -33,7 +33,7 @@ export function SampleNotice({ tenantId }: { tenantId: string }) {
   return (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-md px-4 py-2.5 ring-1 ring-inset ring-line" role="note" data-testid="sample-notice">
       <span className="inline-flex h-[18px] items-center rounded-xs px-1.5 font-mono text-[11px] font-medium uppercase tracking-[0.06em] text-fg-3 ring-1 ring-inset ring-line-strong">Sample</span>
-      <p className="min-w-0 flex-1 text-xs leading-5 text-fg-2">
+      <p className="min-w-0 basis-full text-xs leading-5 text-fg-2 sm:flex-1 sm:basis-0">
         This workspace includes seeded sample history so every page has something to show. Sample rows are badged and excluded from goals, totals and spend.
       </p>
       <div className="flex items-center gap-1.5">
