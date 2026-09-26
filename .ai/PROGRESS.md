@@ -13,3 +13,14 @@
   (both `next build` OK).
 - Minted scoped GX virtual key `gigpilot` (gx-mini/gx-code/gx-auto) — verified.
 - Started gigpilot-db (postgres:17) on 127.0.0.1:4715 with external volume.
+- Launched 4 parallel specialists: agent system (router/broker/mock/storage/agents/worker/demo
+  seeder), integrations (GX/Factory/Grok/Kie/Higgsfield/marketplaces/health/AgentOS), dashboard
+  (apps/app + packages/ui), marketing site (apps/web).
+- Ops (orchestrator): single multi-role Dockerfile + entrypoint (secret files → env), full compose
+  stack (db, migrate, web, app, worker) with hardening + health checks, `gigpilot-ts-proxy@4710/4711`
+  user units (active, bound to 100.105.214.61), nightly backup timer, deploy.sh (lock, mem guard,
+  backup, migrate, --wait, smoke, rollback), backup/restore scripts, install-host.sh (run: OK),
+  runtime config `/srv/projects/gigpilot/config/gigpilot.env`, VPS compose + Caddyfile + runbook.
+- Docs: README, docs/ARCHITECTURE.md, docs/RUNBOOK.md, ops/gx10-01/README.md.
+- E2E: playwright.config.ts + e2e/{auth,demo-flow,smoke}.spec.ts against a data-testid contract
+  sent to the dashboard specialist.

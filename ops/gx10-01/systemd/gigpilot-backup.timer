@@ -1,0 +1,10 @@
+[Unit]
+Description=Nightly GigPilot backup (runs before gx-backup's restic snapshot)
+
+[Timer]
+OnCalendar=*-*-* 03:05:00
+RandomizedDelaySec=5m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

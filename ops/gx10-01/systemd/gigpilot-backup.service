@@ -1,0 +1,8 @@
+[Unit]
+Description=GigPilot database + storage backup
+After=docker.service
+
+[Service]
+Type=oneshot
+Nice=10
+ExecStart=%h/.local/share/gigpilot/bin/backup.sh

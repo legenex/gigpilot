@@ -46,6 +46,9 @@ export const envSchema = z.object({
   /** Shared bearer token for the AgentOS supervision API. */
   AGENTOS_SUPERVISION_TOKEN: optionalSecret,
   AGENTOS_BASE_URL: z.string().optional(),
+  AGENTOS_STATUS_FILE: z.string().default("/srv/projects/gigpilot/status/agentos.json"),
+  AGENTOS_PUSH_ENABLED: bool.default(false),
+  AGENTOS_PUSH_TOKEN: optionalSecret,
 
   STORAGE_DRIVER: z.enum(["filesystem", "s3"]).default("filesystem"),
   STORAGE_ROOT: z.string().default("./var/storage"),
@@ -65,6 +68,7 @@ export const envSchema = z.object({
   FACTORY_DROID_BIN: z.string().default("droid"),
   /** Factory model id; "auto" uses Factory Router. */
   FACTORY_MODEL: z.string().default("auto"),
+  FACTORY_TIMEOUT_MS: z.coerce.number().int().default(600_000),
 
   GX_BASE_URL: z.string().optional(),
   GX_API_KEY: optionalSecret,
@@ -84,13 +88,16 @@ export const envSchema = z.object({
   KIE_API_KEY: optionalSecret,
   KIE_BASE_URL: z.string().default("https://api.kie.ai"),
   KIE_WEBHOOK_HMAC_KEY: optionalSecret,
+  KIE_POLL_TIMEOUT_MS: z.coerce.number().int().default(900_000),
   HIGGSFIELD_API_KEY: optionalSecret,
   HIGGSFIELD_API_SECRET: optionalSecret,
   HIGGSFIELD_BASE_URL: z.string().default("https://api.higgsfield.ai"),
+  HIGGSFIELD_POLL_TIMEOUT_MS: z.coerce.number().int().default(900_000),
 
   // --- Marketplaces -----------------------------------------------------------
   UPWORK_CLIENT_ID: optionalSecret,
   UPWORK_CLIENT_SECRET: optionalSecret,
+  UPWORK_ACCESS_TOKEN: optionalSecret,
   FREELANCER_OAUTH_TOKEN: optionalSecret,
   FREELANCER_BASE_URL: z.string().default("https://www.freelancer.com/api"),
   FREELANCER_CLIENT_ID: optionalSecret,
@@ -144,6 +151,8 @@ const SECRET_KEYS = new Set<keyof Env>([
   "KIE_WEBHOOK_HMAC_KEY",
   "FREELANCER_CLIENT_ID",
   "FREELANCER_CLIENT_SECRET",
+  "UPWORK_ACCESS_TOKEN",
+  "AGENTOS_PUSH_TOKEN",
 ]);
 
 /** Diagnostic view of the environment with secrets reduced to presence flags. */

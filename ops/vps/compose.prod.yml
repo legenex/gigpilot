@@ -1,0 +1,114 @@
+# GigPilot — public VPS deployment (gigpilot.ai + app.gigpilot.ai).
+# NOT deployed yet: requires DNS, a VPS and credentials (human gates).
+# Differences from gx10-01: Caddy terminates HTTPS for both domains and is the
+# only service with public ports; sessions are shared across the apex and the
+# app subdomain via AUTH_COOKIE_DOMAIN=gigpilot.ai; object storage can be S3/R2.
+name: gigpilot
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "5" }
+
+x-node: &node
+  image: ${GIGPILOT_IMAGE:?set GIGPILOT_IMAGE}
+  restart: unless-stopped
+  user: "10001:10001"
+  read_only: true
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+  logging: *logging
+  env_file: [./gigpilot.env]
+  environment:
+    POSTGRES_HOST: db
+    POSTGRES_DB: gigpilot
+    POSTGRES_USER: gigpilot
+  tmpfs: ["/tmp:size=256m,mode=1777"]
+  secrets: [postgres_password, better_auth_secret, encryption_key, agentos_supervision_token, inbound_webhook_secret]
+  networks: [internal]
+  depends_on:
+    db: { condition: service_healthy }
+    migrate: { condition: service_completed_successfully }
+
+services:
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports: ["80:80", "443:443", "443:443/udp"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [internal]
+    logging: *logging
+
+  db:
+    image: postgres:17-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: gigpilot
+      POSTGRES_DB: gigpilot
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      PGDATA: /var/lib/postgresql/data/pgdata
+    secrets: [postgres_password]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gigpilot -d gigpilot"]
+      interval: 10s
+      retries: 10
+    logging: *logging
+
+  migrate:
+    <<: *node
+    restart: "no"
+    command: ["migrate"]
+    depends_on:
+      db: { condition: service_healthy }
+
+  web:
+    <<: *node
+    command: ["web"]
+    tmpfs: ["/tmp:size=128m,mode=1777", "/app/web/apps/web/.next/cache:size=256m,uid=10001,gid=10001"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+
+  app:
+    <<: *node
+    command: ["app"]
+    volumes: [storage:/data/storage]
+    tmpfs: ["/tmp:size=256m,mode=1777", "/app/app/apps/app/.next/cache:size=256m,uid=10001,gid=10001"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+
+  worker:
+    <<: *node
+    command: ["worker"]
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_DB: gigpilot
+      POSTGRES_USER: gigpilot
+      WORKER_BIND: 0.0.0.0
+      WORKER_HEALTH_PORT: "4712"
+    volumes: [storage:/data/storage]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4712/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+    stop_grace_period: 40s
+
+secrets:
+  postgres_password: { file: ./secrets/postgres_password }
+  better_auth_secret: { file: ./secrets/better_auth_secret }
+  encryption_key: { file: ./secrets/encryption_key }
+  agentos_supervision_token: { file: ./secrets/agentos_supervision_token }
+  inbound_webhook_secret: { file: ./secrets/inbound_webhook_secret }
+
+volumes:
+  pgdata:
+  storage:
+  caddy_data:
+  caddy_config:
+
+networks:
+  internal:

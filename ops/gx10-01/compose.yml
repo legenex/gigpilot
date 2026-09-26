@@ -3,9 +3,11 @@
 # Conventions (see ops/gx10-01/README.md):
 #   * compose project "gigpilot"; only touch docker resources prefixed gigpilot
 #   * ports publish on 127.0.0.1 only (boot-safe); Tailscale exposure is done by
-#     the gigpilot-ts-proxy user unit which waits for the Tailscale IP
+#     the gigpilot-ts-proxy@<port> user units which wait for the Tailscale IP
 #   * data lives in EXTERNAL volumes so `down -v` can never delete it
-#   * secrets are files under /srv/projects/gigpilot/secrets (mode 0600)
+#   * secrets are files under /srv/projects/gigpilot/secrets (mode 0600),
+#     non-secret config in /srv/projects/gigpilot/config/gigpilot.env
+#   * image tag comes from GIGPILOT_IMAGE (set by scripts/deploy.sh)
 name: gigpilot
 
 x-logging: &logging
@@ -20,6 +22,27 @@ x-hardening: &hardening
   cap_drop: [ALL]
   restart: unless-stopped
   logging: *logging
+
+x-node: &node
+  <<: *hardening
+  image: ${GIGPILOT_IMAGE:-gigpilot:latest}
+  user: "10001:10001"
+  read_only: true
+  env_file:
+    - /srv/projects/gigpilot/config/gigpilot.env
+  environment:
+    POSTGRES_HOST: db
+    POSTGRES_DB: gigpilot
+    POSTGRES_USER: gigpilot
+    STORAGE_ROOT: /data/storage
+  tmpfs:
+    - /tmp:size=256m,mode=1777
+  depends_on:
+    db:
+      condition: service_healthy
+    migrate:
+      condition: service_completed_successfully
+  pids_limit: 512
 
 services:
   db:
@@ -48,9 +71,121 @@ services:
     mem_limit: 2g
     pids_limit: 512
 
+  migrate:
+    <<: *hardening
+    image: ${GIGPILOT_IMAGE:-gigpilot:latest}
+    user: "10001:10001"
+    read_only: true
+    restart: "no"
+    command: ["migrate"]
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_DB: gigpilot
+      POSTGRES_USER: gigpilot
+    secrets: [postgres_password]
+    networks: [internal]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    <<: *node
+    command: ["web"]
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_DB: gigpilot
+      POSTGRES_USER: gigpilot
+      GIGPILOT_SERVICE: web
+      DATABASE_POOL_MAX: "4"
+    secrets: [postgres_password, better_auth_secret, encryption_key]
+    ports:
+      - "127.0.0.1:4710:3000"
+    networks: [internal]
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+      - /app/web/apps/web/.next/cache:size=256m,uid=10001,gid=10001
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    mem_limit: 1g
+    cpus: 2
+
+  app:
+    <<: *node
+    command: ["app"]
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_DB: gigpilot
+      POSTGRES_USER: gigpilot
+      GIGPILOT_SERVICE: app
+      STORAGE_ROOT: /data/storage
+      DATABASE_POOL_MAX: "8"
+    secrets:
+      [postgres_password, better_auth_secret, encryption_key, agentos_supervision_token, inbound_webhook_secret, gx_api_key]
+    volumes:
+      - gigpilot_storage:/data/storage
+    ports:
+      - "127.0.0.1:4711:3000"
+    networks: [internal, gx_gateway]
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+      - /app/app/apps/app/.next/cache:size=256m,uid=10001,gid=10001
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    mem_limit: 2g
+    cpus: 2
+
+  worker:
+    <<: *node
+    command: ["worker"]
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_DB: gigpilot
+      POSTGRES_USER: gigpilot
+      GIGPILOT_SERVICE: worker
+      STORAGE_ROOT: /data/storage
+      WORKER_BIND: 0.0.0.0
+      WORKER_HEALTH_PORT: "4712"
+      AGENTOS_STATUS_FILE: /status/agentos.json
+      DATABASE_POOL_MAX: "10"
+    secrets:
+      [postgres_password, better_auth_secret, encryption_key, agentos_supervision_token, inbound_webhook_secret, gx_api_key]
+    volumes:
+      - gigpilot_storage:/data/storage
+      - /srv/projects/gigpilot/status:/status
+    ports:
+      - "127.0.0.1:4712:4712"
+    networks: [internal, gx_gateway]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4712/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    stop_grace_period: 40s
+    mem_limit: 2g
+    cpus: 4
+
 secrets:
   postgres_password:
     file: /srv/projects/gigpilot/secrets/postgres_password
+  better_auth_secret:
+    file: /srv/projects/gigpilot/secrets/better_auth_secret
+  encryption_key:
+    file: /srv/projects/gigpilot/secrets/encryption_key
+  agentos_supervision_token:
+    file: /srv/projects/gigpilot/secrets/agentos_supervision_token
+  inbound_webhook_secret:
+    file: /srv/projects/gigpilot/secrets/inbound_webhook_secret
+  gx_api_key:
+    file: /srv/projects/gigpilot/secrets/gx_api_key
 
 volumes:
   gigpilot_pgdata:

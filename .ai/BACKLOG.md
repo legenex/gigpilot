@@ -7,8 +7,8 @@
 | 3 | agents runtime + worker service + schedules + demo seeder | agent: worker | in progress |
 | 4 | dashboard app (all pages, SSE, command palette) + shared UI components | agent: dashboard | in progress |
 | 5 | marketing site | agent: web | in progress |
-| 6 | Docker image + compose + ts-proxy + deploy/backup scripts | orchestrator | todo |
-| 7 | Playwright E2E demo flow + auth/route tests | orchestrator | todo |
+| 6 | Docker image + compose + ts-proxy + deploy/backup scripts | orchestrator | written; build pending integration |
+| 7 | Playwright E2E demo flow + auth/route tests | orchestrator | written; run pending |
 | 8 | Independent reviews (design, security, engineering, ops, product) | evaluators | todo |
-| 9 | VPS production config (Caddy, domains, backups) | orchestrator | todo |
+| 9 | VPS production config (Caddy, domains, backups) | orchestrator | done (not deployed — human gate) |
 | 10 | Final report | orchestrator | todo |

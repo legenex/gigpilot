@@ -1,0 +1,25 @@
+# Automatic HTTPS (Let's Encrypt) for both domains once DNS points here.
+{
+	email ops@gigpilot.ai
+}
+
+gigpilot.ai, www.gigpilot.ai {
+	@www host www.gigpilot.ai
+	redir @www https://gigpilot.ai{uri} permanent
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+	reverse_proxy web:3000
+}
+
+app.gigpilot.ai {
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+	# Inbound marketplace-notification webhooks are rate limited in-app.
+	reverse_proxy app:3000
+}
