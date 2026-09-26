@@ -53,6 +53,7 @@ test("opportunity → proposal → job → QA fail → repair → approval → d
   await pollPage(page, `${APP_URL}/radar/${oppId}`, async () => (await panel.getAttribute("data-status").catch(() => null)) === "awaiting_approval", 120_000);
   expect(money(await page.getByTestId("proposal-price").textContent())).toBeGreaterThan(0);
   await page.getByTestId("proposal-approve").click();
+  await page.getByTestId("proposal-approve-confirm").click();
   await expect(panel).toHaveAttribute("data-status", "approved", { timeout: 30_000 });
 
   // 12. Demo client accepts → job created
@@ -72,6 +73,7 @@ test("opportunity → proposal → job → QA fail → repair → approval → d
 
   // 19–20. Owner approves final delivery; package is downloadable
   await page.getByTestId("job-approve-delivery").click();
+  await page.getByTestId("confirm-action").click();
   await expect(status).toHaveAttribute("data-status", "delivered", { timeout: 30_000 });
   const href = await page.getByTestId("job-delivery-download").getAttribute("href");
   expect(href).toBeTruthy();

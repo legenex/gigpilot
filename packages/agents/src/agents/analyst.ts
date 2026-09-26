@@ -207,20 +207,36 @@ export async function runOpportunityAnalyse(payload: QueuePayloads["opportunity-
           },
           { markets, preferredMinBudgetUsd: settings.thresholds.preferredMinBudgetUsd, now: deps.now() },
         );
-        const res = await callIntelligence(
-          ctx,
-          {
-            task: "analyse_opportunity",
-            messages: analysisPrompt(opp, baseline),
-            schema: opportunityAnalysisSchema,
-            schemaName: "opportunity_analysis",
-            maxOutputTokens: 2500,
-            temperature: 0.2,
-            mockResult: () => baseline,
-          },
-          { opportunityId: opp.id },
-        );
-        const analysis = res.family === "mock" ? baseline : sanitiseAnalysis(res.data ?? baseline, baseline);
+        // Two-tier analysis: an instant deterministic triage priced by the same economics
+        // engine; deep model analysis (local GX, ~30–60 s) only when the brief could be worth
+        // pursuing, or when the owner explicitly asks for a re-analysis.
+        const metrics = await tenantMetrics(db, tenantId);
+        const triage = computeEconomics(baseline, opp, settings, metrics);
+        const deep = Boolean(payload.force) || triage.score.recommendation !== "skip";
+        let provider = "heuristic";
+        let model = "deterministic-triage";
+        let analysis = baseline;
+        if (deep) {
+          const res = await callIntelligence(
+            ctx,
+            {
+              task: "analyse_opportunity",
+              messages: analysisPrompt(opp, baseline),
+              schema: opportunityAnalysisSchema,
+              schemaName: "opportunity_analysis",
+              maxOutputTokens: 2500,
+              temperature: 0.2,
+              mockResult: () => baseline,
+            },
+            { opportunityId: opp.id },
+          );
+          provider = res.family;
+          model = res.model;
+          analysis = res.family === "mock" ? baseline : sanitiseAnalysis(res.data ?? baseline, baseline);
+        } else {
+          ctx.provider = provider;
+          ctx.model = model;
+        }
 
         const [latest] = await db
           .select({ version: opportunityAnalysis.version })
@@ -230,11 +246,10 @@ export async function runOpportunityAnalyse(payload: QueuePayloads["opportunity-
           .limit(1);
         const [analysisRow] = await db
           .insert(opportunityAnalysis)
-          .values({ tenantId, opportunityId: opp.id, version: (latest?.version ?? 0) + 1, analysis, provider: res.family, model: res.model, agentRunId: ctx.runId })
+          .values({ tenantId, opportunityId: opp.id, version: (latest?.version ?? 0) + 1, analysis, provider, model, agentRunId: ctx.runId })
           .returning({ id: opportunityAnalysis.id });
         if (!analysisRow) throw new Error("analysis insert failed");
 
-        const metrics = await tenantMetrics(db, tenantId);
         const { economics, score } = computeEconomics(analysis, opp, settings, metrics);
         const estimateId = await persistEstimate(db, { tenantId, opportunityId: opp.id, analysisId: analysisRow.id, economics });
         await db.insert(opportunityScore).values({
@@ -286,7 +301,7 @@ export async function runOpportunityAnalyse(payload: QueuePayloads["opportunity-
               subjectType: "opportunity",
               subjectId: opp.id,
               message,
-              data: { provider: res.family, model: res.model, family: analysis.serviceFamily },
+              data: { provider, model, family: analysis.serviceFamily, triaged: !deep },
             },
           });
           await emitEvent(tx, {

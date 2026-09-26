@@ -31,10 +31,19 @@ export const WORKER_VERSION = process.env.GIGPILOT_VERSION ?? "0.1.0";
 
 async function queueStats(boss: QueueStatsSource | null): Promise<AgentOSStatusSnapshot["queues"]> {
   const out: AgentOSStatusSnapshot["queues"] = {};
+  for (const name of Object.values(QUEUES)) out[name] = { queued: 0, active: 0, failed: 0 };
   if (!boss) return out;
   try {
-    const rows = await boss.getQueues(Object.values(QUEUES));
-    for (const r of rows) out[r.name] = { queued: Number(r.queuedCount ?? 0), active: Number(r.activeCount ?? 0), failed: Number(r.failedCount ?? 0) };
+    // Live counts straight from pg-boss's job table (getQueues() returns periodically cached counts).
+    const rows = (await getDb().execute(
+      sql`select name, state, count(*)::int as n from pgboss.job where state in ('created', 'retry', 'active', 'failed') group by name, state`,
+    )) as unknown as { name: string; state: string; n: number }[];
+    for (const r of rows) {
+      const q = out[r.name] ?? (out[r.name] = { queued: 0, active: 0, failed: 0 });
+      if (r.state === "created" || r.state === "retry") q.queued += Number(r.n);
+      else if (r.state === "active") q.active += Number(r.n);
+      else if (r.state === "failed") q.failed += Number(r.n);
+    }
   } catch {
     /* queue stats are best effort */
   }
