@@ -82,6 +82,18 @@ export function normaliseRaw(raw: RawOpportunity) {
   };
 }
 
+/** Market (service family) for a normalised listing: detector hits first, then keyword match. */
+export function matchMarket(
+  n: { title: string; description: string; skills: string[] },
+  markets: { key: string; enabled: boolean; keywords: string[] }[],
+): { key: string; score: number } | null {
+  const keywordMatch = matchServiceFamily(`${n.title} ${n.description}`, n.skills, markets);
+  const detected = detectFamily({ title: n.title, description: n.description, skills: n.skills, marketKey: keywordMatch?.key ?? null });
+  const enabledKeys = new Set(markets.filter((m) => m.enabled).map((m) => m.key));
+  const detectedMatch = enabledKeys.has(detected.family) ? { key: detected.family, score: detected.hits } : null;
+  return detected.hits >= 2 && detectedMatch ? detectedMatch : (keywordMatch ?? (detected.hits >= 1 ? detectedMatch : null));
+}
+
 /**
  * Opportunity Scout. Pulls from a permitted source adapter (respecting its
  * SourceCapabilities), normalises, matches markets, dedupes, triages budget,
@@ -172,11 +184,7 @@ export async function runSourceRefresh(payload: SourceRefreshPayload, deps: Agen
           }
           const hash = dedupeHash(n.title, n.description);
           const dupOf = findDuplicate({ title: n.title, description: n.description }, recent);
-          const keywordMatch = matchServiceFamily(`${n.title} ${n.description}`, n.skills, markets);
-          const detected = detectFamily({ title: n.title, description: n.description, skills: n.skills, marketKey: keywordMatch?.key ?? null });
-          const enabledKeys = new Set(markets.filter((m) => m.enabled).map((m) => m.key));
-          const detectedMatch = enabledKeys.has(detected.family) ? { key: detected.family, score: detected.hits } : null;
-          const match = detected.hits >= 2 && detectedMatch ? detectedMatch : (keywordMatch ?? (detected.hits >= 1 ? detectedMatch : null));
+          const match = matchMarket(n, markets);
           const triage = triageBudget(n, settings.thresholds.preferredMinBudgetUsd);
           if (triage === "low_budget") result.lowBudget++;
           const expiresAt =

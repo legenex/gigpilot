@@ -94,10 +94,13 @@ services:
     environment:
       POSTGRES_HOST: db
       POSTGRES_DB: gigpilot
-      POSTGRES_USER: gigpilot
+      POSTGRES_USER: gigpilot_app
       GIGPILOT_SERVICE: web
       DATABASE_POOL_MAX: "4"
-    secrets: [postgres_password, better_auth_secret, encryption_key]
+    secrets:
+      - source: postgres_app_password
+        target: postgres_password
+      - better_auth_secret
     ports:
       - "127.0.0.1:4710:3000"
     networks: [internal]
@@ -119,12 +122,18 @@ services:
     environment:
       POSTGRES_HOST: db
       POSTGRES_DB: gigpilot
-      POSTGRES_USER: gigpilot
+      POSTGRES_USER: gigpilot_app
       GIGPILOT_SERVICE: app
       STORAGE_ROOT: /data/storage
       DATABASE_POOL_MAX: "8"
     secrets:
-      [postgres_password, better_auth_secret, encryption_key, agentos_supervision_token, inbound_webhook_secret, gx_api_key]
+      - source: postgres_app_password
+        target: postgres_password
+      - better_auth_secret
+      - encryption_key
+      - agentos_supervision_token
+      - inbound_webhook_secret
+      - gx_api_key
     volumes:
       - gigpilot_storage:/data/storage
     ports:
@@ -148,7 +157,7 @@ services:
     environment:
       POSTGRES_HOST: db
       POSTGRES_DB: gigpilot
-      POSTGRES_USER: gigpilot
+      POSTGRES_USER: gigpilot_app
       GIGPILOT_SERVICE: worker
       STORAGE_ROOT: /data/storage
       WORKER_BIND: 0.0.0.0
@@ -156,7 +165,11 @@ services:
       AGENTOS_STATUS_FILE: /status/agentos.json
       DATABASE_POOL_MAX: "10"
     secrets:
-      [postgres_password, better_auth_secret, encryption_key, agentos_supervision_token, inbound_webhook_secret, gx_api_key]
+      - source: postgres_app_password
+        target: postgres_password
+      - encryption_key
+      - agentos_supervision_token
+      - gx_api_key
     volumes:
       - gigpilot_storage:/data/storage
       - /srv/projects/gigpilot/status:/status
@@ -173,9 +186,42 @@ services:
     mem_limit: 2g
     cpus: 4
 
+  # Tailscale edge: binds the host's Tailscale IP (host networking) and proxies to
+  # the loopback ports. If Tailscale is not up yet at boot the bind fails, the
+  # container exits and Docker's restart policy retries until the IP exists.
+  edge:
+    image: caddy:2
+    <<: *hardening
+    network_mode: host
+    read_only: true
+    user: "10001:10001"
+    environment:
+      GIGPILOT_TS_IP: ${GIGPILOT_TS_IP:-100.105.214.61}
+      XDG_DATA_HOME: /tmp/caddy-data
+      XDG_CONFIG_HOME: /tmp/caddy-config
+    volumes:
+      - ./edge/Caddyfile:/etc/caddy/Caddyfile:ro
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    depends_on:
+      web:
+        condition: service_healthy
+      app:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://${GIGPILOT_TS_IP:-100.105.214.61}:4711/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    mem_limit: 256m
+    pids_limit: 128
+
 secrets:
   postgres_password:
     file: /srv/projects/gigpilot/secrets/postgres_password
+  postgres_app_password:
+    file: /srv/projects/gigpilot/secrets/postgres_app_password
   better_auth_secret:
     file: /srv/projects/gigpilot/secrets/better_auth_secret
   encryption_key:

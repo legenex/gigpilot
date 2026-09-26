@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { setTenantSecretLookup } from "../lib/credentials";
+import { setOperatorTenantCheck, setTenantSecretLookup } from "../lib/credentials";
 import { CLEAR_PROVIDER_ENV, jsonResponse, mockFetch, setEnv, type RecordedCall } from "../lib/testing";
 import { FreelancerSource, describeFreelancerError, mapFreelancerProject, resetFreelancerRateState, toUsd } from "./freelancer";
 
@@ -7,10 +7,14 @@ let restore: () => void;
 beforeEach(() => {
   restore = setEnv({ ...CLEAR_PROVIDER_ENV, FREELANCER_OAUTH_TOKEN: "fl-token-abc" });
   resetFreelancerRateState();
+  // The env token is an operator credential: these tests act as an operator workspace.
+  setTenantSecretLookup(async () => undefined);
+  setOperatorTenantCheck(async () => true);
 });
 afterEach(() => {
   restore();
   setTenantSecretLookup(null);
+  setOperatorTenantCheck(null);
 });
 
 const project = {

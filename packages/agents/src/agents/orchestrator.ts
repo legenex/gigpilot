@@ -1,3 +1,4 @@
+import { OPERATIONAL_DEFAULTS } from "@gigpilot/config";
 import { QUEUES, type QueuePayloads } from "@gigpilot/contracts";
 import { and, asc, delivery, emitEvent, eq, getDb, inArray, job, revision, transition, workflow, workflowStep } from "@gigpilot/db";
 import type { AgentDeps } from "../deps";
@@ -5,12 +6,16 @@ import { isQaStep } from "../heuristics/workflows";
 import { notify } from "../lib/notify";
 import { quote } from "../lib/util";
 import type { StepRow } from "../runtime";
-import { handleRevisionRequest } from "./recovery";
+import { blockedReasonOf, isOwnerBlocked } from "../lib/steps";
+import { handleRevisionRequest, recoverFromQaFailure } from "./recovery";
 
-/** Max steps of one job executing concurrently. */
-export const JOB_PARALLELISM = 2;
+/** Max steps of one job executing concurrently (OPERATIONAL_DEFAULTS.jobParallelism, see DECISIONS D12). */
+export const JOB_PARALLELISM = OPERATIONAL_DEFAULTS.jobParallelism;
 
 const ACTIVE_JOB_STATES = ["ready", "executing", "qa", "repairing"] as const;
+
+/** Delivery rows that mean "packaging is in progress or needs the job monitor" (never queue another). */
+export const OPEN_DELIVERY_STATES = ["preparing", "prepared", "failed"] as const;
 
 export async function loadActiveSteps(tenantId: string, jobId: string): Promise<StepRow[]> {
   const db = getDb();
@@ -29,13 +34,20 @@ export interface TickResult {
   dispatched: string[];
   readied: string[];
   retried: string[];
+  blocked: string[];
   deliveryQueued: boolean;
+}
+
+function outputOf(s: StepRow): Record<string, unknown> {
+  return (s.output ?? {}) as Record<string, unknown>;
 }
 
 /**
  * Orchestrator tick (stately per job). Advances the DAG: promotes steps whose
  * dependencies succeeded, retries failed steps within their attempt limit
- * (each retry is a new agent_run), moves the job into QA when the QA step is
+ * (each retry is a new agent_run), parks steps that exhausted their attempts
+ * as `blocked` for the owner (resumeJob), processes owner revisions, re-runs
+ * Recovery after an owner resume, moves the job into QA when the QA step is
  * reached, dispatches ready steps up to the per-job parallelism cap and
  * queues delivery packaging once every step has succeeded. Every status
  * change goes through transition().
@@ -43,7 +55,7 @@ export interface TickResult {
 export async function runWorkflowTick(payload: QueuePayloads["workflow-tick"], deps: AgentDeps): Promise<TickResult> {
   const db = getDb();
   const { tenantId, jobId } = payload;
-  const result: TickResult = { status: "ticked", dispatched: [], readied: [], retried: [], deliveryQueued: false };
+  const result: TickResult = { status: "ticked", dispatched: [], readied: [], retried: [], blocked: [], deliveryQueued: false };
   const [j] = await db.select().from(job).where(and(eq(job.id, jobId), eq(job.tenantId, tenantId))).limit(1);
   if (!j) return { ...result, status: "skipped", reason: "job not found" };
   if (!(ACTIVE_JOB_STATES as readonly string[]).includes(j.status)) return { ...result, status: "skipped", reason: `job is ${j.status}` };
@@ -66,15 +78,23 @@ export async function runWorkflowTick(payload: QueuePayloads["workflow-tick"], d
   let steps = await loadActiveSteps(tenantId, jobId);
   if (steps.length === 0) return { ...result, status: "skipped", reason: "no active workflow" };
 
-  // Owner-requested changes: reopen work before anything else.
   if (jobStatus === "repairing") {
+    // Owner-requested changes: reopen work before anything else, whatever the step states.
     const [openRevision] = await db
       .select()
       .from(revision)
       .where(and(eq(revision.jobId, j.id), eq(revision.status, "open")))
       .limit(1);
-    if (openRevision && steps.every((s) => s.status === "succeeded" || s.status === "skipped")) {
+    if (openRevision) {
       await handleRevisionRequest({ tenantId, job: j, revisionRow: openRevision, steps }, deps);
+      steps = await loadActiveSteps(tenantId, jobId);
+    }
+    // Owner resumed a job that hit the repair limit: re-run Recovery on the failed QA review.
+    const resumedQa = steps.find((s) => isQaStep(s) && s.status === "blocked" && blockedReasonOf(s) === "repair_limit" && outputOf(s).resumeRequestedAt);
+    if (resumedQa) {
+      const { resumeRequestedAt: _drop, ...rest } = outputOf(resumedQa);
+      await db.update(workflowStep).set({ output: rest }).where(eq(workflowStep.id, resumedQa.id));
+      await recoverFromQaFailure({ tenantId, jobId, qaStepId: resumedQa.id, parentRunId: null }, deps);
       steps = await loadActiveSteps(tenantId, jobId);
     }
   }
@@ -87,12 +107,12 @@ export async function runWorkflowTick(payload: QueuePayloads["workflow-tick"], d
       await transition(db, { machine: "step", id: s.id, tenantId, to: "ready", actor, reason: "dependencies satisfied" });
       s.status = "ready";
       result.readied.push(s.key);
-    } else if (s.status === "blocked" && depsDone(s) && (s.output as Record<string, unknown> | null)?.blockedReason !== "budget") {
+    } else if (s.status === "blocked" && depsDone(s) && !isOwnerBlocked(s)) {
       await transition(db, { machine: "step", id: s.id, tenantId, to: "ready", actor, reason: "upstream repaired" });
       s.status = "ready";
       result.readied.push(s.key);
     } else if (s.status === "failed") {
-      const qaVerdictFail = isQaStep(s) && (s.output as Record<string, unknown> | null)?.verdict === "fail";
+      const qaVerdictFail = isQaStep(s) && outputOf(s).verdict === "fail";
       if (qaVerdictFail) continue; // handled by the Recovery agent
       if (s.attempts < s.maxAttempts) {
         await transition(db, {
@@ -107,13 +127,26 @@ export async function runWorkflowTick(payload: QueuePayloads["workflow-tick"], d
         s.status = "ready";
         result.retried.push(s.key);
       } else {
+        // Attempts exhausted: park for the owner (resumeJob authorises a new attempt window).
+        await transition(db, {
+          machine: "step",
+          id: s.id,
+          tenantId,
+          to: "blocked",
+          actor,
+          reason: `attempt limit reached (${s.attempts}/${s.maxAttempts}) — waiting for the owner`,
+          patch: { output: { ...outputOf(s), blockedReason: "attempts_exhausted", blockedAt: new Date().toISOString() } },
+          event: { type: "step.blocked", level: "warn", agent: "orchestrator", subjectType: "step", subjectId: s.id, jobId: j.id, message: `${s.name} used all ${s.maxAttempts} attempts — paused until you resume the job` },
+        });
+        s.status = "blocked";
+        result.blocked.push(s.key);
         await notify(db, {
           tenantId,
           kind: "alert",
           title: `${s.name} failed ${s.attempts} times`,
-          body: `“${j.title.slice(0, 80)}” is paused: ${s.error ?? "step failed"}. Review and retry or adjust limits.`,
+          body: `“${j.title.slice(0, 80)}” is paused: ${s.error ?? "step failed"}. Review, then resume the job to authorise more attempts.`,
           link: `/jobs/${j.id}`,
-          dedupeKey: `step-exhausted:${s.id}`,
+          dedupeKey: `step-exhausted:${s.id}:${s.maxAttempts}`,
         });
       }
     }
@@ -146,7 +179,7 @@ export async function runWorkflowTick(payload: QueuePayloads["workflow-tick"], d
     const pending = await db
       .select({ id: delivery.id })
       .from(delivery)
-      .where(and(eq(delivery.jobId, j.id), inArray(delivery.status, ["preparing", "prepared"])))
+      .where(and(eq(delivery.jobId, j.id), inArray(delivery.status, [...OPEN_DELIVERY_STATES])))
       .limit(1);
     if (!pending[0]) {
       await deps.queue.send(QUEUES.deliveryPrepare, { tenantId, jobId: j.id }, { singletonKey: j.id });

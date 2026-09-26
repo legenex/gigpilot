@@ -3,6 +3,7 @@ import type {
   AgentKey,
   Capability,
   CreativeRequest,
+  IntelligenceMessage,
   IntelligenceRequest,
   SubjectType,
   TenantSettings,
@@ -12,6 +13,7 @@ import {
   and,
   asset,
   costLedgerEntry,
+  desc,
   emitEvent,
   eq,
   gte,
@@ -19,16 +21,27 @@ import {
   getDb,
   getTenantSettings,
   job,
+  ne,
+  or,
   providerMetric,
   sql,
   transition,
   workflowStep,
   type Executor,
 } from "@gigpilot/db";
-import type { BudgetContext, CreativeRouteDecision, RoutedIntelligenceResult } from "@gigpilot/providers";
+import {
+  detectLikelySecret,
+  isHeavyGxTask,
+  isProviderError,
+  UNTRUSTED_DATA_RULE,
+  type BudgetContext,
+  type CreativeRouteDecision,
+  type RoutedIntelligenceResult,
+} from "@gigpilot/providers";
 import { buildAssetKey, sha256Hex } from "@gigpilot/providers/storage";
 import { brokerOf, routerOf, storageOf, type AgentDeps } from "./deps";
 import { configuredCreativeProviders, isConfiguredFor } from "./lib/adapters";
+import { budgetSnapshot, releaseReservation, reserveSpend, settleReservation } from "./lib/budget";
 import { notify } from "./lib/notify";
 import { money, round4, safeError, startOfUtcDay } from "./lib/util";
 
@@ -55,6 +68,8 @@ export interface RunInput {
   dependencies?: string[];
   /** Human-readable label for the run start event. */
   label?: string;
+  /** Cancels provider calls (defaults to deps.signal). */
+  signal?: AbortSignal;
 }
 
 export interface RunContext {
@@ -71,7 +86,15 @@ export interface RunContext {
   model: string | null;
   /** Concise, user-visible outcome stored on the run. */
   summary: string | null;
+  /** Aborted on queue expiry or worker shutdown; passed to every provider call. */
+  signal?: AbortSignal;
   settings(): Promise<TenantSettings>;
+  /**
+   * Cooperative cancellation point between units of work: throws
+   * StepAbortedError when the worker is shutting down, the queue job expired,
+   * or the job was cancelled by the owner.
+   */
+  checkpoint(): Promise<void>;
 }
 
 export class BudgetBlockedError extends Error {
@@ -81,14 +104,36 @@ export class BudgetBlockedError extends Error {
   }
 }
 
+export type AbortReason = "shutdown" | "timeout" | "cancelled";
+
+/** Work stopped at a checkpoint (shutdown → resumable, timeout → failed attempt, cancelled → job cancelled). */
+export class StepAbortedError extends Error {
+  constructor(
+    public readonly reason: AbortReason,
+    message?: string,
+  ) {
+    super(message ?? (reason === "shutdown" ? "interrupted by worker shutdown" : reason === "cancelled" ? "job was cancelled" : "timed out (queue expiry)"));
+    this.name = "StepAbortedError";
+  }
+}
+
+/** Why the current handler should stop, or null. Shutdown wins over expiry. */
+export function abortReasonOf(deps: AgentDeps): AbortReason | null {
+  if (deps.shutdown?.aborted) return "shutdown";
+  if (deps.signal?.aborted) return "timeout";
+  return null;
+}
+
 /**
  * Executes an agent unit of work as an audited agent_run: queued → running →
- * succeeded | failed. A failed run is never overwritten — retries create a
- * new row with attempt + 1.
+ * succeeded | failed (| cancelled when stopped by shutdown or job
+ * cancellation). A failed run is never overwritten — retries create a new row
+ * with attempt + 1.
  */
 export async function runAgent<T>(input: RunInput, fn: (ctx: RunContext) => Promise<T>): Promise<T> {
   const db = getDb();
   const attempt = input.attempt ?? 1;
+  const signal = input.signal ?? input.deps.signal;
   const [row] = await db
     .insert(agentRun)
     .values({
@@ -124,7 +169,16 @@ export async function runAgent<T>(input: RunInput, fn: (ctx: RunContext) => Prom
     provider: null,
     model: null,
     summary: null,
+    signal,
     settings: () => (settingsCache ??= getTenantSettings(getDb(), input.tenantId)),
+    checkpoint: async () => {
+      const reason = abortReasonOf(input.deps) ?? (signal?.aborted ? "timeout" : null);
+      if (reason) throw new StepAbortedError(reason);
+      if (input.jobId) {
+        const [j] = await getDb().select({ status: job.status }).from(job).where(eq(job.id, input.jobId)).limit(1);
+        if (j?.status === "cancelled") throw new StepAbortedError("cancelled");
+      }
+    },
   };
 
   await transition(db, {
@@ -177,12 +231,14 @@ export async function runAgent<T>(input: RunInput, fn: (ctx: RunContext) => Prom
     return result;
   } catch (err) {
     const message = safeError(err);
+    // Shutdown / owner cancellation stop the run without counting as a failure.
+    const stopped = (err instanceof StepAbortedError && err.reason !== "timeout") || input.deps.shutdown?.aborted === true;
     try {
       await transition(db, {
         machine: "run",
         id: runId,
         tenantId: input.tenantId,
-        to: "failed",
+        to: stopped ? "cancelled" : "failed",
         actor,
         patch: {
           finishedAt: new Date(),
@@ -195,13 +251,13 @@ export async function runAgent<T>(input: RunInput, fn: (ctx: RunContext) => Prom
         },
         event: {
           type: "agent.run",
-          level: "error",
+          level: stopped ? "warn" : "error",
           agent: input.agent,
           runId,
           subjectType: input.subjectType ?? null,
           subjectId: input.subjectId ?? null,
           jobId: input.jobId ?? null,
-          message: `${input.label ?? input.task} failed: ${message.slice(0, 200)}`,
+          message: `${input.label ?? input.task} ${stopped ? "stopped" : "failed"}: ${message.slice(0, 200)}`,
         },
       });
     } catch (inner) {
@@ -215,22 +271,13 @@ export async function runAgent<T>(input: RunInput, fn: (ctx: RunContext) => Prom
 // Spend authority
 // ---------------------------------------------------------------------------
 
-async function paidSpentSince(db: Executor, since: Date, tenantId?: string): Promise<number> {
-  const where = tenantId
-    ? and(eq(costLedgerEntry.tenantId, tenantId), eq(costLedgerEntry.paid, true), eq(costLedgerEntry.kind, "actual"), gte(costLedgerEntry.createdAt, since))
-    : and(eq(costLedgerEntry.paid, true), eq(costLedgerEntry.kind, "actual"), gte(costLedgerEntry.createdAt, since));
-  const [row] = await db
-    .select({ total: sql<string | null>`coalesce(sum(${costLedgerEntry.amountUsd}), 0)` })
-    .from(costLedgerEntry)
-    .where(where);
-  return Number(row?.total ?? 0);
-}
-
 /**
  * Paid providers are allowed only when BOTH the deployment budget
  * (PAID_PROVIDER_DAILY_BUDGET_USD) and the tenant's daily limit are > 0.
  * Remaining = min(env budget − today's paid spend (all tenants), tenant limit
- * − today's tenant paid spend), further capped by the job's spend limit.
+ * − today's tenant paid spend, job limit − job actual), each also net of
+ * other callers' open spend reservations. This is a planning view; the hard
+ * check happens in `reserveSpend` under an advisory lock.
  */
 export async function computeBudget(
   db: Executor,
@@ -238,23 +285,60 @@ export async function computeBudget(
   settings: TenantSettings,
   opts: { jobId?: string | null; now?: Date } = {},
 ): Promise<BudgetContext> {
-  const envBudget = env().PAID_PROVIDER_DAILY_BUDGET_USD;
-  const tenantLimit = settings.limits.dailyPaidSpendLimitUsd;
-  if (!(envBudget > 0) || !(tenantLimit > 0)) return { allowPaid: false, remainingPaidUsd: 0 };
-  const since = startOfUtcDay(opts.now ?? new Date());
-  const [globalSpent, tenantSpent] = await Promise.all([paidSpentSince(db, since), paidSpentSince(db, since, tenantId)]);
-  let remaining = Math.min(envBudget - globalSpent, tenantLimit - tenantSpent);
-  if (opts.jobId) {
-    const [j] = await db.select({ limit: job.spendLimitUsd, actual: job.actualCostUsd }).from(job).where(eq(job.id, opts.jobId)).limit(1);
-    if (j) remaining = Math.min(remaining, Number(j.limit) - Number(j.actual));
-  }
-  return { allowPaid: true, remainingPaidUsd: Math.max(0, remaining) };
+  const snap = await budgetSnapshot(db, tenantId, settings, opts);
+  return { allowPaid: snap.allowPaid, remainingPaidUsd: snap.remainingPaidUsd };
 }
 
 async function addCosts(db: Executor, ctx: { jobId: string | null; stepId: string | null }, amountUsd: number): Promise<void> {
   if (!(amountUsd > 0)) return;
   if (ctx.jobId) await db.update(job).set({ actualCostUsd: sql`${job.actualCostUsd} + ${amountUsd}` }).where(eq(job.id, ctx.jobId));
   if (ctx.stepId) await db.update(workflowStep).set({ actualCostUsd: sql`${workflowStep.actualCostUsd} + ${amountUsd}` }).where(eq(workflowStep.id, ctx.stepId));
+}
+
+// ---------------------------------------------------------------------------
+// Untrusted input / output hygiene
+// ---------------------------------------------------------------------------
+
+/** Exact server credential values (never allowed in model output). */
+function knownSecretValues(): string[] {
+  const out: string[] = [];
+  for (const [k, v] of Object.entries(process.env)) {
+    if (!v || v.length < 12) continue;
+    if (/(KEY|SECRET|TOKEN|PASSWORD|DATABASE_URL)/.test(k)) out.push(v.trim());
+  }
+  return out;
+}
+
+/** Ensure the untrusted-data rule is in the system prompt whenever a request embeds untrusted blocks. */
+function withUntrustedRule(messages: IntelligenceMessage[]): IntelligenceMessage[] {
+  if (!messages.some((m) => m.content.includes("<untrusted_brief"))) return messages;
+  if (messages.some((m) => m.role === "system" && m.content.includes(UNTRUSTED_DATA_RULE))) return messages;
+  const idx = messages.findIndex((m) => m.role === "system");
+  if (idx < 0) return [{ role: "system", content: UNTRUSTED_DATA_RULE }, ...messages];
+  return messages.map((m, i) => (i === idx ? { ...m, content: `${m.content}\n\n${UNTRUSTED_DATA_RULE}` } : m));
+}
+
+// ---------------------------------------------------------------------------
+// Local model quota
+// ---------------------------------------------------------------------------
+
+const quotaNotified = new Set<string>();
+
+/** Heavy (non-fast-model) GX calls the tenant made today — one inference ledger row per call. */
+async function heavyGxCallsToday(db: Executor, tenantId: string, now: Date): Promise<number> {
+  const [row] = await db
+    .select({ n: sql<number>`count(*)::int` })
+    .from(costLedgerEntry)
+    .where(
+      and(
+        eq(costLedgerEntry.tenantId, tenantId),
+        eq(costLedgerEntry.category, "inference"),
+        eq(costLedgerEntry.provider, "gx"),
+        ne(costLedgerEntry.model, env().GX_MODEL_FAST),
+        gte(costLedgerEntry.createdAt, startOfUtcDay(now)),
+      ),
+    );
+  return Number(row?.n ?? 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -268,8 +352,9 @@ export interface CallIntelligenceOptions {
 }
 
 /**
- * Routed LLM call with spend authority, ledger entry, fallback events and
- * run/job/step cost accounting.
+ * Routed LLM call with spend authority (paid calls reserve their estimate
+ * first), the per-tenant local-model quota, ledger entry, fallback events,
+ * output secret scanning and run/job/step cost accounting.
  */
 export async function callIntelligence<T>(
   ctx: RunContext,
@@ -278,10 +363,31 @@ export async function callIntelligence<T>(
 ): Promise<RoutedIntelligenceResult<T>> {
   const db = getDb();
   const settings = await ctx.settings();
-  const budget = await computeBudget(db, ctx.tenantId, settings, { jobId: ctx.jobId });
+  let budget = await computeBudget(db, ctx.tenantId, settings, { jobId: ctx.jobId });
   const router = routerOf(ctx.deps);
+  const now = ctx.deps.now();
 
   let allowed = [...settings.routing.allowedModelFamilies];
+  // Shared GX capacity: a tenant beyond its daily heavy-model quota falls back to triage/mock.
+  if (allowed.includes("gx") && isHeavyGxTask(req.task) && (await heavyGxCallsToday(db, ctx.tenantId, now)) >= settings.limits.dailyLocalModelCalls) {
+    allowed = allowed.filter((f) => f !== "gx");
+    const key = `${ctx.tenantId}:${startOfUtcDay(now).toISOString().slice(0, 10)}`;
+    if (!quotaNotified.has(key)) {
+      if (quotaNotified.size > 10_000) quotaNotified.clear();
+      quotaNotified.add(key);
+      await emitEvent(db, {
+        tenantId: ctx.tenantId,
+        type: "provider.quota",
+        level: "warn",
+        agent: ctx.agent,
+        runId: ctx.runId,
+        jobId: ctx.jobId,
+        message: `Daily local-model quota reached (${settings.limits.dailyLocalModelCalls} heavy GX calls) — falling back to triage/mock until tomorrow (UTC)`,
+        data: { limit: settings.limits.dailyLocalModelCalls, task: req.task },
+      });
+    }
+  }
+
   if (opts.avoidFamilies?.length) {
     const candidates = router
       .routeFor(req.task, { tenantId: ctx.tenantId, budget, allowedFamilies: allowed, preferLocalForCheapTasks: settings.routing.preferLocalForCheapTasks })
@@ -295,12 +401,56 @@ export async function callIntelligence<T>(
     if (alternative) allowed = allowed.filter((f) => !opts.avoidFamilies!.includes(f));
   }
 
-  const res = await router.complete(
-    { ...req, context: { tenantId: ctx.tenantId, jobId: ctx.jobId ?? undefined, opportunityId: opts.opportunityId ?? undefined, agentRunId: ctx.runId } },
-    { tenantId: ctx.tenantId, budget, allowedFamilies: allowed, preferLocalForCheapTasks: settings.routing.preferLocalForCheapTasks },
-  );
+  const request: IntelligenceRequest<T> = {
+    ...req,
+    messages: withUntrustedRule(req.messages),
+    signal: req.signal ?? ctx.signal,
+    context: { tenantId: ctx.tenantId, jobId: ctx.jobId ?? undefined, opportunityId: opts.opportunityId ?? undefined, agentRunId: ctx.runId },
+  };
+
+  // Hard limit: reserve the most expensive paid route this call could take.
+  let reservationId: string | null = null;
+  if (budget.allowPaid) {
+    let maxEstimate = 0;
+    for (const p of router.providers()) {
+      if (!p.paid || !allowed.includes(p.family) || !p.supports(req.task)) continue;
+      if (!(await isConfiguredFor(p, ctx.tenantId))) continue;
+      const est = p.estimateCost(request);
+      if (Number.isFinite(est)) maxEstimate = Math.max(maxEstimate, est);
+    }
+    if (maxEstimate > 0) {
+      const r = await reserveSpend({
+        tenantId: ctx.tenantId,
+        jobId: ctx.jobId,
+        stepId: ctx.stepId,
+        key: `reservation:${ctx.runId}:${req.task}:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+        amountUsd: maxEstimate,
+        memo: `${req.task} (intelligence)`,
+        settings,
+        now,
+      });
+      if (r.ok) {
+        reservationId = r.id;
+        budget = { allowPaid: true, remainingPaidUsd: r.amountUsd };
+        request.maxCostUsd = Math.min(request.maxCostUsd ?? Number.POSITIVE_INFINITY, r.amountUsd);
+      } else {
+        // Paid routes are skipped for this call (local/mock still answer).
+        budget = { allowPaid: false, remainingPaidUsd: 0 };
+      }
+    }
+  }
+
+  let res: RoutedIntelligenceResult<T>;
+  try {
+    res = await router.complete(request, { tenantId: ctx.tenantId, budget, allowedFamilies: allowed, preferLocalForCheapTasks: settings.routing.preferLocalForCheapTasks });
+  } catch (err) {
+    await releaseReservation(reservationId, `released: ${safeError(err, 120)}`);
+    throw err;
+  }
 
   const cost = Math.max(0, res.usage.costUsd || 0);
+  const paid = res.paid && cost > 0;
+  await settleReservation(reservationId, paid ? cost : 0);
   await db.insert(costLedgerEntry).values({
     tenantId: ctx.tenantId,
     jobId: ctx.jobId,
@@ -310,7 +460,7 @@ export async function callIntelligence<T>(
     provider: res.family,
     model: res.model,
     amountUsd: round4(cost),
-    paid: res.paid && cost > 0,
+    paid,
     agentRunId: ctx.runId,
     memo: `${req.task} · ${res.usage.inputTokens.toLocaleString("en-US")} in / ${res.usage.outputTokens.toLocaleString("en-US")} out tokens (${res.usage.costSource})`,
   });
@@ -345,6 +495,25 @@ export async function callIntelligence<T>(
     })
     .where(eq(agentRun.id, ctx.runId));
   await addCosts(db, ctx, cost);
+
+  // Output scan before anything is persisted: a model output that carries a likely
+  // secret is discarded (callers fall back to their deterministic result).
+  if (res.family !== "mock") {
+    const found = detectLikelySecret(`${res.text ?? ""}\n${res.data === undefined ? "" : JSON.stringify(res.data)}`, knownSecretValues());
+    if (found) {
+      await emitEvent(db, {
+        tenantId: ctx.tenantId,
+        type: "security.output_rejected",
+        level: "warn",
+        agent: ctx.agent,
+        runId: ctx.runId,
+        jobId: ctx.jobId,
+        message: `Discarded ${res.family}/${res.model} output for ${req.task}: it contained a likely secret (${found}) — using the deterministic result instead`,
+        data: { task: req.task, kind: found },
+      });
+      return { ...res, text: "", data: undefined };
+    }
+  }
   return res;
 }
 
@@ -408,6 +577,12 @@ export interface CallCreativeInput {
   aspectRatio?: CreativeRequest["aspectRatio"];
   durationSec?: number;
   params?: Record<string, unknown>;
+  /**
+   * Stable key of the deliverable UNIT (e.g. `gen:<step>:<scope>:<unit>`),
+   * NOT attempt-scoped: a unit that already succeeded is reused (never
+   * regenerated or paid twice); each attempt gets its own generation row
+   * (`<key>#<n>`) so a failed attempt is never overwritten.
+   */
   idempotencyKey: string;
   label: string;
   simulateDefect?: string | null;
@@ -424,6 +599,8 @@ export interface CallCreativeResult {
   provider: string;
   model: string;
   reused: boolean;
+  /** "live" | "mock" (for reused units: the mode that produced them). */
+  mode: "live" | "mock";
 }
 
 async function observedMetrics(db: Executor, tenantId: string) {
@@ -440,28 +617,55 @@ async function observedMetrics(db: Executor, tenantId: string) {
   return rows;
 }
 
+/** Provider output that failed but may still be charged (poll timeout / interrupted wait). */
+function mayStillBeBilled(message: string | undefined): boolean {
+  return Boolean(message && /may still (complete and )?be billed/i.test(message));
+}
+
+async function recordPendingCost(
+  db: Executor,
+  ctx: RunContext,
+  input: { jobId: string; generationId: string; provider: string; model: string; amountUsd: number; paid: boolean; label: string },
+) {
+  if (!(input.amountUsd > 0)) return;
+  await db.insert(costLedgerEntry).values({
+    tenantId: ctx.tenantId,
+    jobId: input.jobId,
+    category: "creative",
+    kind: "actual",
+    provider: input.provider,
+    model: input.model,
+    amountUsd: round4(input.amountUsd),
+    paid: input.paid,
+    agentRunId: ctx.runId,
+    generationId: input.generationId,
+    memo: `pending: provider task may be billed — ${input.label}`.slice(0, 300),
+  });
+  await addCosts(db, ctx, input.amountUsd);
+}
+
 /**
  * Brokered creative generation. Enforces spend authority (a paid route that
  * the job's spend limit cannot afford BLOCKS the step — no silent mock
- * substitution once real spend is enabled), is idempotent per
- * generation.idempotencyKey, stores output bytes, and records generation,
- * asset, ledger and cost rows.
+ * substitution once real spend is enabled), reserves paid spend before the
+ * call (hard limit), reuses a unit that already succeeded, stores output
+ * bytes, and records generation, asset, ledger and cost rows.
  */
 export async function callCreative(ctx: RunContext, input: CallCreativeInput): Promise<CallCreativeResult> {
   const db = getDb();
   const settings = await ctx.settings();
   const broker = brokerOf(ctx.deps);
   const tenantId = ctx.tenantId;
+  const unitKey = input.idempotencyKey;
 
   const [existing] = await db
     .select()
     .from(generation)
-    .where(and(eq(generation.tenantId, tenantId), eq(generation.idempotencyKey, input.idempotencyKey)))
+    .where(and(eq(generation.tenantId, tenantId), or(eq(generation.unitKey, unitKey), eq(generation.idempotencyKey, unitKey)), eq(generation.status, "succeeded")))
+    .orderBy(desc(generation.createdAt))
     .limit(1);
-  if (existing && existing.status === "succeeded") {
-    const assets = existing.assetId
-      ? await db.select().from(asset).where(and(eq(asset.tenantId, tenantId), eq(asset.stepId, input.step.id)))
-      : [];
+  if (existing) {
+    const assets = existing.assetId ? await db.select().from(asset).where(and(eq(asset.tenantId, tenantId), eq(asset.stepId, input.step.id))) : [];
     const mine = assets.filter((a) => (a.meta as Record<string, unknown> | null)?.generationId === existing.id);
     return {
       generationId: existing.id,
@@ -471,13 +675,14 @@ export async function callCreative(ctx: RunContext, input: CallCreativeInput): P
       provider: existing.provider,
       model: existing.model,
       reused: true,
+      mode: (existing.params as Record<string, unknown> | null)?.simulated === true || existing.provider === "mock" ? "mock" : "live",
     };
   }
 
-  const budget = await computeBudget(db, tenantId, settings, { jobId: input.job.id });
+  const snap = await budgetSnapshot(db, tenantId, settings, { jobId: input.job.id });
+  const budget: BudgetContext = { allowPaid: snap.allowPaid, remainingPaidUsd: snap.remainingPaidUsd };
   const metrics = await observedMetrics(db, tenantId);
-  const [freshJob] = await db.select({ limit: job.spendLimitUsd, actual: job.actualCostUsd }).from(job).where(eq(job.id, input.job.id)).limit(1);
-  const jobRemaining = Math.max(0, Number(freshJob?.limit ?? input.job.spendLimitUsd) - Number(freshJob?.actual ?? input.job.actualCostUsd));
+  const jobRemaining = Number.isFinite(snap.jobRemainingUsd) ? snap.jobRemainingUsd : 0;
   const maxCostUsd = input.maxCostUsd ?? Math.max(0, jobRemaining);
   const opts = {
     tenantId,
@@ -491,7 +696,36 @@ export async function callCreative(ctx: RunContext, input: CallCreativeInput): P
     configuredProviders: await configuredCreativeProviders(broker, tenantId),
   };
 
+  const blocked = async (routeLabel: string, neededUsd: number, availableUsd: number): Promise<never> => {
+    const msg = `Blocked ${input.label}: ${routeLabel} needs about ${money(neededUsd)} but only ${money(availableUsd)} of paid spend remains for this job`;
+    await emitEvent(db, {
+      tenantId,
+      type: "budget.blocked",
+      level: "warn",
+      agent: ctx.agent,
+      runId: ctx.runId,
+      jobId: input.job.id,
+      subjectType: "step",
+      subjectId: input.step.id,
+      message: msg,
+      data: { remainingPaidUsd: budget.remainingPaidUsd, jobRemainingUsd: jobRemaining, route: routeLabel },
+    });
+    await notify(db, {
+      tenantId,
+      kind: "alert",
+      title: `Spend limit reached on “${input.job.title.slice(0, 80)}”`,
+      body: `${msg}. Raise the job's spend limit or the daily paid budget to continue — nothing was charged.`,
+      link: `/jobs/${input.job.id}`,
+      dedupeKey: `budget-blocked:${input.step.id}:${ctx.attempt}`,
+    });
+    throw new BudgetBlockedError(msg);
+  };
+
+  let reservation: { id: string; amountUsd: number } | null = null;
+  let generateBudget = budget;
+  let generateMaxCost = maxCostUsd;
   if (budget.allowPaid) {
+    const unitCost = (o: { unitCostUsd: number | null; unit: string }) => (o.unitCostUsd ?? 0) * (o.unit === "second" ? (input.durationSec ?? 8) : 1);
     const ideal = broker.plan(input.capability, {
       ...opts,
       budget: { allowPaid: true, remainingPaidUsd: Number.POSITIVE_INFINITY },
@@ -499,30 +733,29 @@ export async function callCreative(ctx: RunContext, input: CallCreativeInput): P
     } as Parameters<typeof broker.plan>[1]);
     const actual = broker.plan(input.capability, { ...opts, maxCostUsd, durationSec: input.durationSec } as Parameters<typeof broker.plan>[1]);
     if (ideal.mode === "live" && actual.mode === "mock") {
-      const msg = `Blocked ${input.label}: ${ideal.option.provider}/${ideal.option.model} needs about ${money(
-        (ideal.option.unitCostUsd ?? 0) * (ideal.option.unit === "second" ? (input.durationSec ?? 8) : 1),
-      )} but only ${money(Math.min(budget.remainingPaidUsd, maxCostUsd))} of paid spend remains for this job`;
-      await emitEvent(db, {
+      await blocked(`${ideal.option.provider}/${ideal.option.model}`, unitCost(ideal.option), Math.min(budget.remainingPaidUsd, maxCostUsd));
+    }
+    const liveProvider = actual.mode === "live" ? broker.providers().find((p) => p.key === actual.option.provider) : undefined;
+    if (liveProvider?.paid) {
+      const expected = unitCost(actual.option);
+      // Headroom for provider-side estimates that differ slightly from the catalog.
+      const r = await reserveSpend({
         tenantId,
-        type: "budget.blocked",
-        level: "warn",
-        agent: ctx.agent,
-        runId: ctx.runId,
         jobId: input.job.id,
-        subjectType: "step",
-        subjectId: input.step.id,
-        message: msg,
-        data: { remainingPaidUsd: budget.remainingPaidUsd, jobRemainingUsd: jobRemaining, route: `${ideal.option.provider}/${ideal.option.model}` },
+        stepId: input.step.id,
+        key: `reservation:${unitKey}#${ctx.runId}`,
+        amountUsd: Math.min(expected * 1.2, maxCostUsd),
+        minAmountUsd: expected,
+        provider: actual.option.provider,
+        memo: input.label,
+        settings,
       });
-      await notify(db, {
-        tenantId,
-        kind: "alert",
-        title: `Spend limit reached on “${input.job.title.slice(0, 80)}”`,
-        body: `${msg}. Raise the job's spend limit or the daily paid budget to continue — nothing was charged.`,
-        link: `/jobs/${input.job.id}`,
-        dedupeKey: `budget-blocked:${input.step.id}:${ctx.attempt}`,
-      });
-      throw new BudgetBlockedError(msg);
+      if (!r.ok) await blocked(`${actual.option.provider}/${actual.option.model}`, expected, r.remainingUsd);
+      else {
+        reservation = { id: r.id, amountUsd: r.amountUsd };
+        generateBudget = { allowPaid: true, remainingPaidUsd: r.amountUsd };
+        generateMaxCost = r.amountUsd;
+      }
     }
   }
 
@@ -532,11 +765,16 @@ export async function callCreative(ctx: RunContext, input: CallCreativeInput): P
     durationSec: input.durationSec ?? null,
     label: input.label,
   };
-  let generationId: string;
-  if (existing) {
-    generationId = existing.id;
-    await db.update(generation).set({ status: "running", error: null }).where(eq(generation.id, existing.id));
-  } else {
+
+  // One generation row per attempt — a failed attempt is never overwritten.
+  let generationId = "";
+  let rowKey = "";
+  for (let tries = 0; tries < 3 && !generationId; tries++) {
+    const [{ n } = { n: 0 }] = await db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(generation)
+      .where(and(eq(generation.tenantId, tenantId), or(eq(generation.unitKey, unitKey), eq(generation.idempotencyKey, unitKey))));
+    rowKey = `${unitKey}#${Number(n) + 1 + tries}`;
     const [row] = await db
       .insert(generation)
       .values({
@@ -550,11 +788,16 @@ export async function callCreative(ctx: RunContext, input: CallCreativeInput): P
         params,
         status: "running",
         repairOfId: input.repairOfId ?? null,
-        idempotencyKey: input.idempotencyKey,
+        idempotencyKey: rowKey,
+        unitKey,
       })
+      .onConflictDoNothing()
       .returning({ id: generation.id });
-    if (!row) throw new Error("generation insert failed");
-    generationId = row.id;
+    if (row) generationId = row.id;
+  }
+  if (!generationId) {
+    await releaseReservation(reservation?.id, "released: generation row conflict");
+    throw new Error(`generation insert failed for ${unitKey}`);
   }
 
   let out: Awaited<ReturnType<typeof broker.generate>>;
@@ -566,15 +809,24 @@ export async function callCreative(ctx: RunContext, input: CallCreativeInput): P
         aspectRatio: input.aspectRatio,
         durationSec: input.durationSec,
         params: input.params,
-        idempotencyKey: input.idempotencyKey,
-        maxCostUsd,
+        idempotencyKey: rowKey,
+        maxCostUsd: generateMaxCost,
         context: { tenantId, jobId: input.job.id, stepId: input.step.id },
+        signal: ctx.signal,
       },
-      opts,
+      { ...opts, budget: generateBudget },
     );
   } catch (err) {
     const message = safeError(err);
     await db.update(generation).set({ status: "failed", error: message }).where(eq(generation.id, generationId));
+    const ambiguous = isProviderError(err) && err.code === "ambiguous_submission";
+    if (ambiguous && reservation) {
+      // The provider may have accepted the job: count the reserved estimate as pending spend.
+      await recordPendingCost(db, ctx, { jobId: input.job.id, generationId, provider: err.provider, model: "unknown", amountUsd: reservation.amountUsd, paid: true, label: input.label });
+      await settleReservation(reservation.id, reservation.amountUsd);
+    } else {
+      await releaseReservation(reservation?.id, `released: ${message.slice(0, 120)}`);
+    }
     await emitEvent(db, {
       tenantId,
       type: "generation.failed",
@@ -593,6 +845,7 @@ export async function callCreative(ctx: RunContext, input: CallCreativeInput): P
   const cost = Math.max(0, out.costUsd || 0);
   const provider = broker.providers().find((p) => p.key === out.provider);
   const paid = !simulated && Boolean(provider?.paid) && cost > 0;
+  await settleReservation(reservation?.id, paid ? cost : 0);
 
   if (out.status !== "succeeded" || out.files.length === 0) {
     const message = out.error ?? "provider returned no files";
@@ -612,20 +865,24 @@ export async function callCreative(ctx: RunContext, input: CallCreativeInput): P
       })
       .where(eq(generation.id, generationId));
     if (cost > 0) {
-      await db.insert(costLedgerEntry).values({
-        tenantId,
-        jobId: input.job.id,
-        category: "creative",
-        kind: "actual",
-        provider: out.provider,
-        model: out.model,
-        amountUsd: round4(cost),
-        paid,
-        agentRunId: ctx.runId,
-        generationId,
-        memo: `${input.label} (failed generation)`,
-      });
-      await addCosts(db, ctx, cost);
+      if (mayStillBeBilled(message)) {
+        await recordPendingCost(db, ctx, { jobId: input.job.id, generationId, provider: out.provider, model: out.model, amountUsd: cost, paid, label: `${input.label} (task ${out.externalTaskId ?? "?"})` });
+      } else {
+        await db.insert(costLedgerEntry).values({
+          tenantId,
+          jobId: input.job.id,
+          category: "creative",
+          kind: "actual",
+          provider: out.provider,
+          model: out.model,
+          amountUsd: round4(cost),
+          paid,
+          agentRunId: ctx.runId,
+          generationId,
+          memo: `${input.label} (failed generation)`,
+        });
+        await addCosts(db, ctx, cost);
+      }
     }
     await emitEvent(db, {
       tenantId,
@@ -723,5 +980,5 @@ export async function callCreative(ctx: RunContext, input: CallCreativeInput): P
     data: { rationale: out.decision.rationale, mode: out.decision.mode, costUsd: cost },
   });
 
-  return { generationId, assets: stored, decision: out.decision, costUsd: cost, provider: out.provider, model: out.model, reused: false };
+  return { generationId, assets: stored, decision: out.decision, costUsd: cost, provider: out.provider, model: out.model, reused: false, mode: out.decision.mode };
 }

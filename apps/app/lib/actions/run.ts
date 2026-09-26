@@ -27,7 +27,7 @@ export function friendlyError(err: unknown): string {
   if (name === "ConcurrentTransitionError") return "Someone (or an agent) changed this at the same moment. Refresh and try again.";
   if (name === "NotFoundError") return "That item no longer exists.";
   const msg = err instanceof Error ? err.message : String(err);
-  if (/ECONNREFUSED|pg-boss|queue/i.test(msg)) return "Saved, but the background queue is unreachable right now — the worker will pick it up when it reconnects.";
+  if (/ECONNREFUSED|pg-boss|queue/i.test(msg)) return "Your change was saved. Background processing couldn't be scheduled right now — it will retry automatically.";
   return "Something went wrong. Please try again.";
 }
 

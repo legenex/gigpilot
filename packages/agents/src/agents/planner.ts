@@ -214,7 +214,11 @@ export async function runJobPlan(payload: QueuePayloads["job-plan"], deps: Agent
 
       const needsInputs = !demo && (analysis?.missingInputs.length ?? 0) > 0;
       const to = needsInputs ? "awaiting_inputs" : "ready";
-      const message = `Planned ${plan.length}-step workflow for ${quote(j.title)} (${source}) — est. production ${money(estimatedTotal)}, spend limit ${money(j.spendLimitUsd)}`;
+      // Incomplete economics (e.g. an unpriced capability): plan anyway, but tell the owner the
+      // estimate — and therefore the job's spend limit — excludes the unknown items.
+      const incomplete = estimate ? !estimate.complete : false;
+      const missing = estimate?.breakdown?.missing ?? [];
+      const message = `Planned ${plan.length}-step workflow for ${quote(j.title)} (${source}) — est. production ${money(estimatedTotal)}${incomplete ? " (incomplete estimate)" : ""}, spend limit ${money(j.spendLimitUsd)}`;
       await transition(db, {
         machine: "job",
         id: j.id,
@@ -222,14 +226,24 @@ export async function runJobPlan(payload: QueuePayloads["job-plan"], deps: Agent
         to,
         actor,
         reason: needsInputs ? `waiting for: ${analysis!.missingInputs.join("; ")}` : "workflow planned",
-        event: { type: "workflow.planned", level: "info", agent: "planner", runId: ctx.runId, subjectType: "job", subjectId: j.id, jobId: j.id, message, data: { steps: plan.map((s) => s.key), source } },
+        event: { type: "workflow.planned", level: incomplete ? "warn" : "info", agent: "planner", runId: ctx.runId, subjectType: "job", subjectId: j.id, jobId: j.id, message, data: { steps: plan.map((s) => s.key), source, estimateComplete: !incomplete, missing } },
       });
+      if (incomplete) {
+        await notify(db, {
+          tenantId,
+          kind: "alert",
+          title: `Incomplete cost estimate for “${j.title.slice(0, 70)}”`,
+          body: `The production estimate excludes: ${missing.slice(0, 4).join("; ") || "some unpriced items"}. The spend limit (${money(j.spendLimitUsd)}) may be too low — raise it on the job page if a step is blocked by the budget.`,
+          link: `/jobs/${j.id}`,
+          dedupeKey: `job-estimate-incomplete:${j.id}`,
+        });
+      }
       if (needsInputs) {
         await notify(db, {
           tenantId,
           kind: "approval",
           title: `Inputs needed for “${j.title.slice(0, 80)}”`,
-          body: `Production is waiting for: ${analysis!.missingInputs.join("; ")}.`,
+          body: `Production is waiting for: ${analysis!.missingInputs.join("; ")}. Confirm on the job page once the client has supplied them.`,
           link: `/jobs/${j.id}`,
           dedupeKey: `job-inputs:${j.id}`,
         });

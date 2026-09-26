@@ -22,7 +22,7 @@ function recorder(respond: (args: string[], call: number) => ExecResult | Promis
 
 let restore: () => void;
 beforeEach(() => {
-  restore = setEnv({ ...CLEAR_PROVIDER_ENV, FACTORY_API_KEY: FAKE_KEY, SOME_OTHER_SECRET: "do-not-leak" });
+  restore = setEnv({ ...CLEAR_PROVIDER_ENV, FACTORY_API_KEY: FAKE_KEY, SOME_OTHER_SECRET: "do-not-leak", FACTORY_ALLOW_IN_PROCESS: "true" });
   resetFactoryState();
 });
 afterEach(() => restore());
@@ -30,6 +30,23 @@ afterEach(() => restore());
 const which = () => "/usr/local/bin/droid";
 
 describe("FactoryProvider", () => {
+  it("stays needs_configuration (sandbox required) unless FACTORY_ALLOW_IN_PROCESS=true", async () => {
+    const undo = setEnv({ FACTORY_ALLOW_IN_PROCESS: undefined });
+    try {
+      const { exec, calls } = recorder(() => ok("never"));
+      const p = new FactoryProvider({ exec, which });
+      expect(p.isConfigured()).toBe(false);
+      expect(await p.isConfiguredFor(null)).toBe(false);
+      const h = await p.health();
+      expect(h.status).toBe("needs_configuration");
+      expect(h.detail).toMatch(/requires an isolated sandbox runner/);
+      await expect(p.complete({ task: "proposal", messages: [{ role: "user", content: "x" }] })).rejects.toMatchObject({ code: "not_configured" });
+      expect(calls).toHaveLength(0);
+    } finally {
+      undo();
+    }
+  });
+
   it("runs droid exec read-only with -o json, -m auto, --cwd and a prompt file; minimal child env", async () => {
     const { exec, calls } = recorder(() => ok("Hello from droid"));
     const res = await new FactoryProvider({ exec, which }).complete({ task: "proposal", messages: [{ role: "system", content: "Be concise." }, { role: "user", content: "Draft it." }] });

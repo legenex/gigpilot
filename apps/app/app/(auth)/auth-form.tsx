@@ -6,17 +6,12 @@ import { useId, useState, useSyncExternalStore } from "react";
 import { CircleAlert, Eye, EyeOff } from "lucide-react";
 import { authClient } from "@gigpilot/auth/client";
 import { Button, Callout, Field, Input } from "@gigpilot/ui";
-
-/** Only same-origin relative paths are honoured for ?next= (no open redirects). */
-export function safeNext(next: string | null | undefined): string {
-  if (!next || !next.startsWith("/") || next.startsWith("//") || next.startsWith("/\\") || next.startsWith("/api/")) return "/";
-  return next;
-}
+import { safeNext } from "@/lib/safe-next";
 
 function friendly(mode: "login" | "signup", err: { status?: number; message?: string; code?: string } | null | undefined): string {
   if (!err) return "Something went wrong. Please try again.";
   const msg = err.message ?? "";
-  if (err.status === 429) return "Too many attempts. Wait a minute and try again.";
+  if (err.status === 429) return /account/i.test(msg) ? msg : "Too many attempts. Wait a minute and try again.";
   if (mode === "login" && (err.status === 401 || /invalid/i.test(msg))) return "That email and password don't match. Check them and try again.";
   if (mode === "signup" && (err.status === 422 || /exist/i.test(msg))) return "An account with this email already exists — log in instead.";
   if (err.status === 403) return msg || "Sign-up is invite-only for this GigPilot instance.";

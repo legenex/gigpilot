@@ -207,3 +207,60 @@ describe("estimateOpportunity", () => {
     expect(economics.grossProfitUsd).toBeGreaterThan(300);
   });
 });
+
+describe("pricing completeness (never invent prices)", () => {
+  const base = {
+    summary: "Dub 4 videos",
+    clientRequest: "dubbing",
+    serviceFamily: "localization-repurposing",
+    deliverables: [{ item: "Dubbed video", quantity: 4 }],
+    suppliedAssets: [],
+    requiredAssets: [],
+    missingInputs: [],
+    skills: [],
+    risks: [],
+    deadlineDays: 7,
+    inferenceEstimates: [],
+    humanHours: 1,
+    billableHours: null,
+    proposedWorkflow: [],
+    fitScore: 0.8,
+    complexity: 0.3,
+    revisionRisk: 0.2,
+    deadlineRisk: 0.2,
+    confidence: 0.8,
+    rationale: [],
+    buyerPriorities: [],
+  } satisfies Omit<OpportunityAnalysis, "productionEstimates">;
+
+  it("flags audio production with no priced route as incomplete instead of $0", () => {
+    const { economics } = estimateOpportunity(
+      { ...base, productionEstimates: [{ label: "Spanish dub", capability: "audio.dub", units: 4, attemptsPerUnit: 1 }] },
+      { sourceKey: "upwork", budgetType: "fixed", budgetMaxUsd: 1500 },
+      defaultTenantSettings(),
+    );
+    expect(economics.complete).toBe(false);
+    expect(economics.missing.join(" ")).toContain("audio.dub");
+    expect(scoreOpportunity(economics, { fit: 0.8, complexity: 0.3, revisionRisk: 0.2, deadlineRisk: 0.2, confidence: 0.8, highRisks: 0 }, defaultTenantSettings().thresholds, 1500).recommendation).not.toBe("pursue");
+  });
+
+  it("does not double count text/code production that is priced via inference", () => {
+    const { economics } = estimateOpportunity(
+      { ...base, productionEstimates: [{ label: "Landing copy", capability: "text.copy", units: 3, attemptsPerUnit: 1 }] },
+      { sourceKey: "upwork", budgetType: "fixed", budgetMaxUsd: 1500 },
+      defaultTenantSettings(),
+    );
+    expect(economics.complete).toBe(true);
+    expect(economics.lineItems).toHaveLength(0);
+  });
+
+  it("flags an unknown marketplace fee schedule as incomplete", () => {
+    const { economics } = estimateOpportunity(
+      { ...base, productionEstimates: [] },
+      { sourceKey: "some-new-marketplace", budgetType: "fixed", budgetMaxUsd: 1500 },
+      defaultTenantSettings(),
+    );
+    expect(economics.complete).toBe(false);
+    expect(economics.missing.join(" ")).toContain("platform fee");
+  });
+});

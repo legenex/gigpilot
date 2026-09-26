@@ -1,7 +1,7 @@
 "use server";
 
 import { z } from "zod";
-import { applyMarketRecommendation, updateMarket } from "@gigpilot/agents";
+import { applyMarketRecommendation, updateMarket, updateMarkets } from "@gigpilot/agents";
 import { runAction } from "./run";
 
 const PATHS = ["/", "/markets"];
@@ -17,7 +17,11 @@ export async function saveAllocationsAction(allocations: { key: string; allocati
     "market.allocations",
     async (ctx) => {
       const rows = allocationSchema.parse(allocations);
-      for (const r of rows) await updateMarket(ctx, r.key, { allocationPct: Math.round(r.allocationPct * 10) / 10 });
+      // One transaction: either every allocation changes or none does.
+      await updateMarkets(
+        ctx,
+        rows.map((r) => ({ key: r.key, allocationPct: Math.round(r.allocationPct * 10) / 10 })),
+      );
     },
     { revalidate: PATHS, message: "Sourcing allocation saved" },
   );

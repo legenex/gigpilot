@@ -8,14 +8,14 @@ process.env.GIGPILOT_SERVICE ??= "gigpilot-worker";
 import type { Server } from "node:http";
 import { env } from "@gigpilot/config";
 import { QUEUES, type QueueName } from "@gigpilot/contracts";
-import { closeDb, pingDb } from "@gigpilot/db";
+import { closeDb, getDb, pingDb } from "@gigpilot/db";
 import { createBoss } from "@gigpilot/db/queue";
 import { enqueuerFrom, handlers, type AgentDeps } from "@gigpilot/agents";
 import { getAgentOSAdapter } from "@gigpilot/providers";
 import { agentLogger, createLogger } from "./logger";
 import { CONCURRENCY, SCHEDULES, SCHEDULED_QUEUES, pollingIntervalFor } from "./schedules";
 import { startHealthServer } from "./server";
-import { buildSnapshot, createErrorRing, migrationsApplied, pendingItems } from "./status";
+import { buildSnapshot, createErrorRing, migrationState, pendingItems, queueHealthy } from "./status";
 
 type Boss = Awaited<ReturnType<typeof createBoss>>;
 
@@ -43,7 +43,10 @@ async function main(): Promise<void> {
   let bossStarted = false;
   let lastScheduleTick: number | null = null;
   let stopping = false;
+  let bossStopped = false;
   const timers: NodeJS.Timeout[] = [];
+  /** Aborted on SIGTERM/SIGINT: every in-flight handler sees it (steps return to `ready`, attempt not consumed). */
+  const shutdownController = new AbortController();
 
   const db = await pingDb();
   if (!db.ok) log.warn({ latencyMs: db.latencyMs }, "database not reachable yet — pg-boss will retry");
@@ -54,6 +57,9 @@ async function main(): Promise<void> {
     errors.push(`queue: ${safeMessage(err)}`);
     log.error({ error: safeMessage(err) }, "pg-boss error");
   });
+  boss.on("stopped", () => {
+    bossStopped = true;
+  });
   const b = boss;
   const queue = enqueuerFrom(b);
 
@@ -63,7 +69,10 @@ async function main(): Promise<void> {
       for (const job of jobs) {
         const data = (job.data ?? {}) as Record<string, unknown>;
         const child = log.child({ queue: name, jobId: job.id, tenantId: typeof data.tenantId === "string" ? data.tenantId : undefined });
-        const deps: AgentDeps = { queue, log: agentLogger(child), now: () => new Date() };
+        // Handler signal = queue expiry (pg-boss job.signal) OR worker shutdown.
+        const jobSignal = (job as { signal?: AbortSignal }).signal;
+        const signal = jobSignal ? AbortSignal.any([jobSignal, shutdownController.signal]) : shutdownController.signal;
+        const deps: AgentDeps = { queue, log: agentLogger(child), now: () => new Date(), signal, shutdown: shutdownController.signal };
         const started = Date.now();
         if (SCHEDULED_QUEUES.has(name)) lastScheduleTick = Date.now();
         try {
@@ -114,16 +123,19 @@ async function main(): Promise<void> {
       log: { warn: (o, m) => log.warn(o, m), info: (o, m) => log.info(o, m) },
       readiness: async () => {
         const ping = await pingDb();
-        const migrated = ping.ok ? await migrationsApplied() : false;
+        const migrations = ping.ok ? await migrationState() : { ok: false, detail: "database unreachable" };
+        // Live queue health: pg-boss running (not stopping/stopped) AND its schema answers a cheap query.
+        const queueOk = bossStarted && !stopping && !bossStopped && ping.ok && (await queueHealthy(getDb()));
         const uptimeMin = (Date.now() - startedAt) / 60_000;
         const scheduleFresh = !cfg.WORKER_SCHEDULES_ENABLED || uptimeMin < 20 || (lastScheduleTick !== null && Date.now() - lastScheduleTick < 20 * 60_000);
         return {
-          ready: ping.ok && bossStarted && !stopping && migrated && scheduleFresh,
+          ready: ping.ok && queueOk && migrations.ok && scheduleFresh,
           checks: {
             database: ping.ok,
             databaseLatencyMs: ping.latencyMs,
-            queue: bossStarted && !stopping,
-            migrations: migrated,
+            queue: queueOk,
+            migrations: migrations.ok,
+            migrationDetail: migrations.detail,
             schedules: cfg.WORKER_SCHEDULES_ENABLED ? (scheduleFresh ? "fresh" : "stale") : "disabled",
             lastScheduleTick: lastScheduleTick ? new Date(lastScheduleTick).toISOString() : "never",
           },
@@ -140,6 +152,9 @@ async function main(): Promise<void> {
     log.info({ signal }, "shutting down gracefully");
     for (const t of timers) clearInterval(t);
     server.close();
+    // Abort in-flight handlers first: an interrupted step goes back to `ready` without consuming
+    // an attempt (and a paid call in flight is recorded as possibly billed); the restarted worker resumes.
+    shutdownController.abort(new Error(`worker shutdown (${signal})`));
     try {
       await b.stop({ graceful: true, timeout: 30_000 });
     } catch (err) {

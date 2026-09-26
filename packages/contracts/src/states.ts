@@ -100,7 +100,9 @@ export type StepState = (typeof STEP_STATES)[number];
 export const STEP_TRANSITIONS: Record<StepState, readonly StepState[]> = {
   pending: ["ready", "skipped", "cancelled", "blocked"],
   ready: ["running", "cancelled", "blocked"],
-  running: ["succeeded", "failed", "cancelled"],
+  // running → ready: interrupted by a worker shutdown (the attempt is not consumed).
+  // running → blocked: outcome ambiguous at the provider (owner must verify before a retry).
+  running: ["succeeded", "failed", "cancelled", "ready", "blocked"],
   succeeded: ["ready"], // re-opened by a repair (new attempt row is recorded)
   failed: ["ready", "blocked", "cancelled"],
   blocked: ["ready", "cancelled"],
@@ -118,10 +120,12 @@ export const RUN_TRANSITIONS: Record<RunState, readonly RunState[]> = {
   cancelled: [],
 };
 
-export const DELIVERY_STATES = ["preparing", "prepared", "approved", "sent", "rejected"] as const;
+export const DELIVERY_STATES = ["preparing", "prepared", "approved", "sent", "rejected", "failed"] as const;
 export type DeliveryState = (typeof DELIVERY_STATES)[number];
 export const DELIVERY_TRANSITIONS: Record<DeliveryState, readonly DeliveryState[]> = {
-  preparing: ["prepared"],
+  // preparing → failed: packaging kept failing; the job monitor re-queues it (bounded).
+  preparing: ["prepared", "failed"],
+  failed: ["preparing"],
   prepared: ["approved", "rejected"],
   approved: ["sent"],
   sent: [],

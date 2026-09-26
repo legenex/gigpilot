@@ -7,7 +7,7 @@ import { InboundOnlySource } from "../lib/inbound-source";
  * from their own inbox (signed inbound webhook) or pastes in, and the owner
  * applies on Contra themselves. See docs/research/marketplaces.md.
  *
- * Credentials: none (the inbound webhook is verified with the server secret
+ * Credentials: none (the inbound webhook is verified with the workspace's own
  * INBOUND_WEBHOOK_SECRET via lib/inbound.ts `verifyInboundSignature`).
  */
 export class ContraSource extends InboundOnlySource implements SourceAdapter {
@@ -27,7 +27,10 @@ export class ContraSource extends InboundOnlySource implements SourceAdapter {
     docsUrl: "https://contra.com/terms",
   };
 
-  withTenant(_tenantId: string | null): ContraSource {
-    return this;
+  /** Bind a workspace: health() then reports on that workspace's own inbound webhook secret. */
+  withTenant(tenantId: string | null): ContraSource {
+    const bound = new ContraSource();
+    bound.boundTenantId = tenantId;
+    return bound;
   }
 }

@@ -4,6 +4,7 @@ import { brokerOf, type AgentDeps } from "../deps";
 import { isQaStep, PRODUCTION_KINDS } from "../heuristics/workflows";
 import { configuredCreativeProviders } from "../lib/adapters";
 import { notify } from "../lib/notify";
+import { clearBlockMarkers } from "../lib/steps";
 import { money, quote, round4, truncate } from "../lib/util";
 import { computeBudget, runAgent, type JobRow, type StepRow } from "../runtime";
 import type { RepairDirective } from "./execution";
@@ -62,7 +63,8 @@ async function blockDownstream(db: Executor, tenantId: string, target: StepRow, 
     if (status === "succeeded") {
       await transition(db, { machine: "step", id: d.id, tenantId, to: "ready", actor, reason });
       await transition(db, { machine: "step", id: d.id, tenantId, to: "blocked", actor, reason: `waiting for ${target.name}` });
-    } else if (status === "failed" || status === "ready") {
+    } else if (status === "failed" || status === "ready" || status === "running") {
+      // A running dependent is working on stale input: park it (its late result is discarded as stale).
       await transition(db, { machine: "step", id: d.id, tenantId, to: "blocked", actor, reason: `waiting for ${target.name}` });
     }
   }
@@ -122,8 +124,14 @@ export async function recoverFromQaFailure(input: { tenantId: string; jobId: str
       }
 
       const budget = await computeBudget(db, j.tenantId, settings, { jobId: j.id });
-      const [fresh] = await db.select({ repairCount: job.repairCount, spendLimitUsd: job.spendLimitUsd, actualCostUsd: job.actualCostUsd }).from(job).where(eq(job.id, j.id)).limit(1);
+      const [fresh] = await db
+        .select({ repairCount: job.repairCount, extraRepairs: job.extraRepairs, spendLimitUsd: job.spendLimitUsd, actualCostUsd: job.actualCostUsd })
+        .from(job)
+        .where(eq(job.id, j.id))
+        .limit(1);
       let repairCount = fresh?.repairCount ?? j.repairCount;
+      // Owner grants (resumeJob) extend the automatic repair allowance for this job only.
+      const repairAllowance = settings.limits.maxRepairsPerJob + (fresh?.extraRepairs ?? j.extraRepairs ?? 0);
       let remainingSpend = Number(fresh?.spendLimitUsd ?? j.spendLimitUsd) - Number(fresh?.actualCostUsd ?? j.actualCostUsd);
       let repairs = 0;
       let escalated = 0;
@@ -159,11 +167,13 @@ export async function recoverFromQaFailure(input: { tenantId: string; jobId: str
           .join("; ");
         const label = review.failingUnits.length ? `${target.name} (${review.failingUnits.map((u) => `#${u + 1}`).join(", ")})` : target.name;
 
-        const limit =
-          !settings.autonomy.autoRepairWithinLimits
+        const mockOnly = review.findings.some((f) => f.code === "produced_by_mock");
+        const limit = mockOnly
+          ? "the deliverable was produced by the mock provider — configure a real provider (or enable paid spend), then resume the job"
+          : !settings.autonomy.autoRepairWithinLimits
             ? "auto-repair is disabled in Settings"
-            : repairCount >= settings.limits.maxRepairsPerJob
-              ? `repair limit reached (${settings.limits.maxRepairsPerJob} per job)`
+            : repairCount >= repairAllowance
+              ? `repair limit reached (${repairAllowance} per job)`
               : target.attempts >= target.maxAttempts
                 ? `${target.name} has used all ${target.maxAttempts} attempts`
                 : incremental > remainingSpend + 1e-9
@@ -263,11 +273,31 @@ export async function recoverFromQaFailure(input: { tenantId: string; jobId: str
         notes.push(`${strategy} ${label}`);
       }
 
+      const [qaNow] = await db.select({ status: workflowStep.status, output: workflowStep.output }).from(workflowStep).where(eq(workflowStep.id, qaStep.id)).limit(1);
       if (repairs > 0) {
         await db.update(job).set({ repairCount }).where(eq(job.id, j.id));
-        const [qaNow] = await db.select({ status: workflowStep.status }).from(workflowStep).where(eq(workflowStep.id, qaStep.id)).limit(1);
+        // Re-check automatically once the repaired steps succeed (no owner block marker).
         if (qaNow?.status === "failed") {
-          await transition(db, { machine: "step", id: qaStep.id, tenantId: j.tenantId, to: "blocked", actor, reason: "waiting for repairs before re-checking" });
+          await transition(db, { machine: "step", id: qaStep.id, tenantId: j.tenantId, to: "blocked", actor, reason: "waiting for repairs before re-checking", patch: { output: clearBlockMarkers(qaNow.output) } });
+        } else if (qaNow?.status === "blocked") {
+          await db.update(workflowStep).set({ output: clearBlockMarkers(qaNow.output) }).where(eq(workflowStep.id, qaStep.id));
+        }
+      } else if (escalated > 0 && (qaNow?.status === "failed" || qaNow?.status === "blocked")) {
+        // Nothing could be repaired automatically: park QA for the owner (resumeJob) instead of a silent dead-end.
+        const output = { ...clearBlockMarkers(qaNow.output), blockedReason: "repair_limit", blockedAt: new Date().toISOString() };
+        if (qaNow.status === "failed") {
+          await transition(db, {
+            machine: "step",
+            id: qaStep.id,
+            tenantId: j.tenantId,
+            to: "blocked",
+            actor,
+            reason: "repair limit reached — waiting for the owner",
+            patch: { output },
+            event: { type: "step.blocked", level: "warn", agent: "recovery", runId: ctx.runId, subjectType: "step", subjectId: qaStep.id, jobId: j.id, message: `${quote(j.title, 50)} needs your decision: automatic repairs are exhausted` },
+          });
+        } else {
+          await db.update(workflowStep).set({ output }).where(eq(workflowStep.id, qaStep.id));
         }
       }
       ctx.summary = notes.length ? notes.join("; ") : "no repairable findings";

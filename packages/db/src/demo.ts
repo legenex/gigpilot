@@ -666,7 +666,8 @@ export async function seedDemoHistory(db: Executor, tenantId: string): Promise<v
           provider: cl.provider,
           model: cl.model,
           capability: cl.capability,
-          params: { aspectRatio: cl.aspect, history: true },
+          // Simulated history: excluded from provider_metric so it never steers real routing.
+          params: { aspectRatio: cl.aspect, history: true, simulated: true },
           estimatedCostUsd: cl.unitCostUsd,
           actualCostUsd: cl.unitCostUsd,
           costSource: "catalog",
@@ -789,17 +790,7 @@ export async function seedDemoHistory(db: Executor, tenantId: string): Promise<v
     if (a.status === "lost") ev({ type: "application.lost", agent: "client", subjectType: "application", subjectId: appId, message: `Application lost: ${a.title}`, createdAt: at(Math.max(0, a.daysAgo - 0.5)) });
   }
 
-  // ------------------------------------------------------------------ provider metrics (consistent with the generations above)
-  const metricAgg = new Map<string, { provider: string; model: string; capability: string; attempts: number; qa: number; cost: number; latency: number }>();
-  for (const g of rows.generation) {
-    const k = `${g.provider}|${g.model}|${g.capability}`;
-    const m = metricAgg.get(k) ?? { provider: g.provider, model: g.model, capability: g.capability, attempts: 0, qa: 0, cost: 0, latency: 0 };
-    m.attempts++;
-    if (g.qaPassed) m.qa++;
-    m.cost += Number(g.actualCostUsd ?? 0);
-    m.latency += Number(g.latencyMs ?? 0);
-    metricAgg.set(k, m);
-  }
+  // ------------------------------------------------------------------ provider metrics (inference only)
   const runAgg = new Map<string, { provider: string; model: string; attempts: number; cost: number }>();
   for (const r of rows.run) {
     if (!r.provider || !r.model || ["kie", "higgsfield", "mock"].includes(r.provider)) continue;
@@ -809,21 +800,9 @@ export async function seedDemoHistory(db: Executor, tenantId: string): Promise<v
     m.cost += Number(r.costUsd ?? 0);
     runAgg.set(k, m);
   }
+  // Creative metrics are NOT seeded: they feed creative routing, and simulated
+  // history must never steer real provider choice.
   const metrics: (typeof providerMetric.$inferInsert)[] = [
-    ...[...metricAgg.values()].map((m) => ({
-      tenantId,
-      provider: m.provider,
-      model: m.model,
-      capability: m.capability,
-      attempts: m.attempts,
-      successes: m.attempts,
-      qaPasses: m.qa,
-      repairs: 0,
-      totalCostUsd: r4(m.cost),
-      avgLatencyMs: Math.round(m.latency / m.attempts),
-      usableRate: Math.round((m.qa / m.attempts) * 1000) / 1000,
-      costPerUsableUsd: m.qa > 0 ? r4(m.cost / m.qa) : null,
-    })),
     ...[...runAgg.values()].map((m) => ({
       tenantId,
       provider: m.provider,
@@ -900,7 +879,7 @@ export async function seedDemoHistory(db: Executor, tenantId: string): Promise<v
       { tenantId, actorType: "system", action: "tenant.demo_seeded", subjectType: "tenant", subjectId: tenantId, data: { jobs: JOBS.length, applications: APPS.length }, createdAt: new Date() },
     ]);
     await tx.insert(notification).values([
-      { tenantId, kind: "info", title: "Market insight: shift sourcing toward AI automation", body: insight.summary.slice(0, 400), link: "/market-lab", dedupeKey: "demo-seed:insight" },
+      { tenantId, kind: "info", title: "Market insight: shift sourcing toward AI automation", body: insight.summary.slice(0, 400), link: "/markets", dedupeKey: "demo-seed:insight" },
       { tenantId, kind: "success", title: `Delivered: ${JOBS[JOBS.length - 1]!.title}`, body: "The client approved the delivery package. Close the job once payment clears.", link: "/jobs", dedupeKey: "demo-seed:delivered" },
     ]);
   };

@@ -21,7 +21,8 @@
     "db:migrate": "pnpm --filter @gigpilot/db migrate",
     "db:seed": "pnpm --filter @gigpilot/db seed",
     "check": "pnpm typecheck && pnpm lint && pnpm test",
-    "secrets:scan": "gitleaks detect --no-banner --redact -v"
+    "secrets:scan": "gitleaks detect --no-banner --redact -v",
+    "e2e:cleanup": "ops/gx10-01/scripts/purge-test-accounts.sh --yes"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.0",

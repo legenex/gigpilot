@@ -131,6 +131,12 @@ export interface CreativeRequest {
   idempotencyKey: string;
   maxCostUsd: number;
   context?: { tenantId?: string; jobId?: string; stepId?: string };
+  /**
+   * Cancels waiting/polling (worker shutdown, queue expiry, job cancellation).
+   * Aborting BEFORE submission throws; aborting AFTER a paid task was accepted
+   * returns `status: "failed"` with the task id ("may still be billed").
+   */
+  signal?: AbortSignal;
 }
 
 export interface CreativeOutput {

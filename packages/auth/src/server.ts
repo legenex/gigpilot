@@ -1,30 +1,66 @@
 import { betterAuth } from "better-auth";
-import { APIError } from "better-auth/api";
+import { APIError, createAuthMiddleware } from "better-auth/api";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { nextCookies, toNextJsHandler } from "better-auth/next-js";
 import { env } from "@gigpilot/config/env";
-import { bootstrapTenantForUser, getDb, getMembership, schema } from "@gigpilot/db";
+import { bootstrapTenantForUser, getDb, getMembership, inArray, parseOperatorEmails, schema, sql, user as userTable } from "@gigpilot/db";
 import { onWorkspaceCreated } from "./hooks";
+import { isEmailAllowed, signupPolicyWarnings, splitList, type SignupPolicy } from "./policy";
+import { clearSigninFailures, lockRemainingMs, readBackoff, recordSigninFailure } from "./signin-backoff";
 
-function splitList(v?: string): string[] {
-  return (v ?? "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
+function signupPolicy(): SignupPolicy {
+  const e = env();
+  return { mode: e.SIGNUP_MODE, allowed: splitList(e.AUTH_ALLOWED_EMAILS), requireEmailVerification: e.AUTH_REQUIRE_EMAIL_VERIFICATION };
 }
 
-function isEmailAllowed(email: string): boolean {
-  const e = env();
-  if (e.SIGNUP_MODE === "open") return true;
-  const allowed = splitList(e.AUTH_ALLOWED_EMAILS).map((s) => s.toLowerCase());
-  const lower = email.toLowerCase();
-  return allowed.some((a) => (a.startsWith("@") ? lower.endsWith(a) : lower === a));
+function warn(msg: string) {
+  console.warn(JSON.stringify({ level: "warn", msg }));
+}
+
+/**
+ * One-time operator warnings (sign-up policy + unregistered operator emails).
+ * Called from the dashboard's instrumentation hook at server start and again
+ * (no-op) when auth initialises.
+ */
+export function logAuthStartupWarnings(): void {
+  const g = globalThis as unknown as { __gigpilotAuthWarned?: boolean };
+  if (g.__gigpilotAuthWarned) return;
+  g.__gigpilotAuthWarned = true;
+  try {
+    logStartupWarnings(env().APP_URL);
+  } catch {
+    /* never block startup on diagnostics */
+  }
+}
+
+function logStartupWarnings(appUrl: string) {
+  for (const w of signupPolicyWarnings(signupPolicy(), appUrl)) warn(w);
+  const operators = parseOperatorEmails();
+  if (!operators.length) return;
+  void getDb()
+    .select({ email: userTable.email })
+    .from(userTable)
+    .where(inArray(sql`lower(${userTable.email})`, operators))
+    .then((rows) => {
+      const found = new Set(rows.map((r) => r.email.toLowerCase()));
+      const missing = operators.filter((o) => !found.has(o)).length;
+      if (missing) {
+        warn(`${missing} OPERATOR_EMAILS address(es) have no account yet. Register them now (first sign-up of an email wins) or remove them — an unregistered operator address could be claimed by someone else while sign-up is open.`);
+      }
+    })
+    .catch(() => undefined);
+}
+
+function emailFromBody(body: unknown): string | null {
+  const v = (body as { email?: unknown } | null | undefined)?.email;
+  return typeof v === "string" && v.trim() ? v.trim().slice(0, 320) : null;
 }
 
 function createAuth() {
   const e = env();
   const secure = e.APP_URL.startsWith("https://");
   const trustedOrigins = Array.from(new Set([e.WEB_URL, e.APP_URL, ...splitList(e.AUTH_TRUSTED_ORIGINS)]));
+  logAuthStartupWarnings();
 
   return betterAuth({
     appName: "GigPilot",
@@ -44,6 +80,8 @@ function createAuth() {
     emailAndPassword: {
       enabled: true,
       autoSignIn: true,
+      // Needs an email sender (not configured in V1) — see AUTH_REQUIRE_EMAIL_VERIFICATION.
+      requireEmailVerification: e.AUTH_REQUIRE_EMAIL_VERIFICATION,
       minPasswordLength: 10,
       maxPasswordLength: 128,
     },
@@ -67,13 +105,59 @@ function createAuth() {
       useSecureCookies: secure,
       cookiePrefix: "gigpilot",
       crossSubDomainCookies: e.AUTH_COOKIE_DOMAIN ? { enabled: true, domain: e.AUTH_COOKIE_DOMAIN } : { enabled: false },
-      ipAddress: { ipAddressHeaders: ["x-forwarded-for", "x-real-ip"] },
+      /*
+       * Client IP for Better Auth's per-IP rate limits. Trustworthy ONLY
+       * behind the GigPilot edge proxy: the Caddy edge (ops/gx10-01/edge,
+       * ops/vps) has no trusted_proxies, so it REPLACES any client-supplied
+       * X-Forwarded-For with the real peer address and sets X-Real-IP; the
+       * app containers publish on 127.0.0.1 only, so clients cannot reach
+       * them without the edge. Better Auth accepts a single-value header only
+       * (multi-hop chains resolve to no IP). Per-account backoff below does
+       * not depend on the IP at all.
+       */
+      ipAddress: { ipAddressHeaders: ["x-forwarded-for", "x-real-ip"], ipv6Subnet: 64 },
+    },
+    hooks: {
+      // Per-account sign-in backoff (independent of IP): refuse while locked.
+      before: createAuthMiddleware(async (ctx) => {
+        if (ctx.path !== "/sign-in/email") return;
+        const email = emailFromBody(ctx.body);
+        if (!email) return;
+        let remaining = 0;
+        try {
+          remaining = lockRemainingMs(await readBackoff(email), Date.now());
+        } catch {
+          remaining = 0; // storage failure must not lock everyone out; per-IP limits still apply
+        }
+        if (remaining > 0) {
+          const minutes = Math.max(1, Math.ceil(remaining / 60_000));
+          throw new APIError("TOO_MANY_REQUESTS", {
+            message: `Too many failed sign-in attempts for this account. Try again in ${minutes} minute${minutes === 1 ? "" : "s"}.`,
+          });
+        }
+      }),
+      // Count failed password checks; a successful sign-in clears the counter.
+      after: createAuthMiddleware(async (ctx) => {
+        if (ctx.path !== "/sign-in/email") return;
+        const email = emailFromBody(ctx.body);
+        if (!email) return;
+        const returned = ctx.context.returned;
+        try {
+          if (returned instanceof APIError) {
+            if (returned.statusCode === 401) await recordSigninFailure(email);
+          } else if (ctx.context.newSession) {
+            await clearSigninFailures(email);
+          }
+        } catch (err) {
+          console.error(JSON.stringify({ level: "warn", msg: "sign-in backoff update failed", error: err instanceof Error ? err.name : "error" }));
+        }
+      }),
     },
     databaseHooks: {
       user: {
         create: {
           before: async (user) => {
-            if (!isEmailAllowed(user.email)) {
+            if (!isEmailAllowed(user.email, signupPolicy())) {
               throw new APIError("FORBIDDEN", { message: "Sign-up is invite-only for this GigPilot instance." });
             }
             return { data: user };

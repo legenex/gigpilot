@@ -40,7 +40,8 @@ export interface FeeSchedule {
 export interface EconomicsInput {
   price: PriceInput;
   lineItems: LineItemInput[];
-  platformFee: FeeSchedule;
+  /** null = no fee schedule known for this source → estimate incomplete. */
+  platformFee: FeeSchedule | null;
   revision: { expectedRounds: number; costFraction: number };
   contingencyPct: number;
   shadow: { hours: number; hourlyRateUsd: number };
@@ -141,7 +142,9 @@ export function calculateEconomics(input: EconomicsInput): EconomicsResult {
     fulfilmentCostUsd * Math.max(0, input.revision.expectedRounds) * Math.max(0, input.revision.costFraction);
   const contingencyUsd = (fulfilmentCostUsd + revisionContingencyUsd) * Math.max(0, input.contingencyPct);
   const shadowCostUsd = Math.max(0, input.shadow.hours) * Math.max(0, input.shadow.hourlyRateUsd);
-  const platformFeesUsd = platformFee(price.priceUsd, input.platformFee);
+  if (!input.platformFee) missing.push("platform fee schedule for this source");
+  const fee: FeeSchedule = input.platformFee ?? { key: "unknown", pct: 0, fixedUsd: 0, minUsd: 0 };
+  const platformFeesUsd = platformFee(price.priceUsd, fee);
 
   const nonFee = fulfilmentCostUsd + revisionContingencyUsd + contingencyUsd + shadowCostUsd;
   const totalCostUsd = nonFee + platformFeesUsd;
@@ -157,11 +160,11 @@ export function calculateEconomics(input: EconomicsInput): EconomicsResult {
     contingencyUsd: cents(contingencyUsd),
     shadowCostUsd: cents(shadowCostUsd),
     platformFeesUsd: cents(platformFeesUsd),
-    platformFeeKey: input.platformFee.key,
+    platformFeeKey: fee.key,
     totalCostUsd: cents(totalCostUsd),
     grossProfitUsd: cents(grossProfitUsd),
     grossMargin: Math.round(grossMargin * 10_000) / 10_000,
-    breakEvenPriceUsd: cents(breakEvenPrice(nonFee, input.platformFee)),
+    breakEvenPriceUsd: cents(breakEvenPrice(nonFee, fee)),
     complete: missing.length === 0,
     missing,
   };

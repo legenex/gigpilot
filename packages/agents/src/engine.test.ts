@@ -22,8 +22,9 @@ import {
 } from "@gigpilot/db";
 import type { CreativeBroker } from "@gigpilot/providers";
 import { createCreativeBroker } from "../../providers/src/broker";
+import { resumeJob } from "./commands";
 import { handlers } from "./handlers";
-import { AUTOMATION_BRIEF, IMAGE_BRIEF, createTestTenant, drain, migrateTestDb, resetDb, testDeps, wonJob } from "./testing/harness";
+import { AUTOMATION_BRIEF, IMAGE_BRIEF, captureCommandQueue, createTestTenant, drain, migrateTestDb, resetDb, testDeps, wonJob } from "./testing/harness";
 
 class PaidFake implements CreativeProvider {
   readonly paid = true;
@@ -74,6 +75,7 @@ describe("workflow engine", () => {
   });
   afterEach(() => {
     process.env.PAID_PROVIDER_DAILY_BUDGET_USD = "0";
+    process.env.TENANT_MAX_DAILY_PAID_USD = "0";
     resetEnvCache();
   });
   afterAll(async () => {
@@ -128,31 +130,52 @@ describe("workflow engine", () => {
     expect(runs.some((r) => r.attempt === 2 && r.status === "succeeded")).toBe(true);
   });
 
-  it("stops at the step attempt limit and alerts the owner", async () => {
+  it("parks a step that exhausted its attempts as blocked, alerts once, and resumes on the owner's new attempt window", async () => {
     const db = getDb();
     const t = await createTestTenant({ settings: { limits: { maxStepAttempts: 2 } } });
     const deps = testDeps({ broker: flakyBroker(1000) });
     const jobId = await wonJob(t, deps, IMAGE_BRIEF, { plan: true });
     await drain(deps);
-    const gen = (await stepsOf(jobId)).find((s) => s.kind === "generate")!;
-    expect(gen.status).toBe("failed");
+    let gen = (await stepsOf(jobId)).find((s) => s.kind === "generate")!;
+    expect(gen.status).toBe("blocked");
+    expect(gen.output).toMatchObject({ blockedReason: "attempts_exhausted" });
     expect(gen.attempts).toBe(2);
     const runs = await db.select().from(agentRun).where(eq(agentRun.stepId, gen.id));
     expect(runs).toHaveLength(2);
     expect(runs.every((r) => r.status === "failed")).toBe(true);
-    const alerts = await db.select().from(notification).where(and(eq(notification.tenantId, t.tenantId), eq(notification.dedupeKey, `step-exhausted:${gen.id}`)));
+    // A second tick does not re-alert (deduped) nor retry.
+    await handlers["workflow-tick"]({ tenantId: t.tenantId, jobId }, deps);
+    await drain(deps);
+    const alerts = await db.select().from(notification).where(and(eq(notification.tenantId, t.tenantId), eq(notification.dedupeKey, `step-exhausted:${gen.id}:2`)));
     expect(alerts).toHaveLength(1);
-    const [j] = await db.select().from(job).where(eq(job.id, jobId));
+    let [j] = await db.select().from(job).where(eq(job.id, jobId));
     expect(j!.status).toBe("executing");
+
+    // Owner fixes the provider and authorises one more attempt: the step re-runs as a NEW agent_run.
+    deps.broker = createCreativeBroker();
+    captureCommandQueue(deps.queue);
+    const res = await resumeJob(t.ctx, jobId, { extraAttempts: 1 });
+    expect(res.resumedSteps).toContain(gen.key);
+    gen = (await stepsOf(jobId)).find((s) => s.id === gen.id)!;
+    expect(gen.status).toBe("ready");
+    expect(gen.maxAttempts).toBe(3);
+    await drain(deps);
+    [j] = await db.select().from(job).where(eq(job.id, jobId));
+    expect(j!.status).toBe("awaiting_final_approval");
+    const after = await db.select().from(agentRun).where(eq(agentRun.stepId, gen.id)).orderBy(asc(agentRun.attempt));
+    expect(after.filter((r) => r.status === "failed")).toHaveLength(2); // history preserved
+    expect(after.some((r) => r.attempt === 3 && r.status === "succeeded")).toBe(true);
+    const audits = await db.select().from(auditEvent).where(and(eq(auditEvent.subjectId, jobId), eq(auditEvent.action, "job.resumed")));
+    expect(audits).toHaveLength(1);
   });
 
-  it("escalates instead of repairing when the repair limit is reached", async () => {
+  it("escalates at the repair limit (QA parked as blocked), then repairs after the owner grants an extra repair", async () => {
     const db = getDb();
     const t = await createTestTenant({ settings: { limits: { maxRepairsPerJob: 0 } } });
     const deps = testDeps();
     const jobId = await wonJob(t, deps, AUTOMATION_BRIEF, { plan: true });
     await drain(deps);
-    const [j] = await db.select().from(job).where(eq(job.id, jobId));
+    let [j] = await db.select().from(job).where(eq(job.id, jobId));
     expect(j!.status).toBe("repairing");
     expect(j!.repairCount).toBe(0);
     const repairs = await db.select().from(repair).where(eq(repair.jobId, jobId));
@@ -160,14 +183,30 @@ describe("workflow engine", () => {
     expect(repairs[0]).toMatchObject({ strategy: "escalate", status: "blocked" });
     const events = await db.select().from(agentEvent).where(and(eq(agentEvent.jobId, jobId), eq(agentEvent.type, "repair.limit_reached")));
     expect(events).toHaveLength(1);
-    const qa = (await stepsOf(jobId)).find((s) => s.agent === "qa")!;
-    expect(qa.status).toBe("failed");
+    let qa = (await stepsOf(jobId)).find((s) => s.agent === "qa")!;
+    expect(qa.status).toBe("blocked");
+    expect(qa.output).toMatchObject({ blockedReason: "repair_limit", verdict: "fail" });
     expect(await db.select().from(notification).where(and(eq(notification.tenantId, t.tenantId), eq(notification.kind, "alert")))).not.toHaveLength(0);
+
+    captureCommandQueue(deps.queue);
+    const res = await resumeJob(t.ctx, jobId, { extraRepairs: 1 });
+    expect(res).toMatchObject({ repairLimit: true, extraRepairs: 1 });
+    await drain(deps);
+    [j] = await db.select().from(job).where(eq(job.id, jobId));
+    expect(j!.status).toBe("awaiting_final_approval");
+    expect(j!.extraRepairs).toBe(1);
+    expect(j!.repairCount).toBe(1);
+    const allRepairs = await db.select().from(repair).where(eq(repair.jobId, jobId));
+    expect(allRepairs.find((r) => r.strategy === "escalate")!.status).toBe("failed");
+    expect(allRepairs.some((r) => r.strategy !== "escalate" && r.status === "succeeded")).toBe(true);
+    qa = (await stepsOf(jobId)).find((s) => s.agent === "qa")!;
+    expect(qa.status).toBe("succeeded");
   });
 
   it("blocks a paid generation that would exceed the job spend limit (no spend, owner alerted)", async () => {
     const db = getDb();
     process.env.PAID_PROVIDER_DAILY_BUDGET_USD = "5";
+    process.env.TENANT_MAX_DAILY_PAID_USD = "5";
     resetEnvCache();
     const t = await createTestTenant({ settings: { limits: { dailyPaidSpendLimitUsd: 5 } } });
     const kie = new PaidFake("kie");

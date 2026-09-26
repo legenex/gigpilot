@@ -30,8 +30,24 @@ import { normalizeStructured, schemaGuide, schemaNameFor, structuredSystemPrompt
  *
  * Credentials (package-wide approach, see lib/credentials.ts): FACTORY_API_KEY
  * per call from the bound tenant (`withTenant`) or `req.context.tenantId`
- * (tenant secret) → env. `isConfigured()` = droid binary on PATH AND env key.
+ * (tenant secret) → env. `isConfigured()` = droid binary on PATH AND env key
+ * AND FACTORY_ALLOW_IN_PROCESS=true.
+ *
+ * Isolation (security review M5): `droid exec` is an agent that runs as a
+ * child of the worker, i.e. with the worker's uid, filesystem and network.
+ * "Read-only autonomy" is a prompt-level policy, not a sandbox: a droid in the
+ * worker container can read /proc/<worker-pid>/environ (every server secret)
+ * and /run/secrets. It therefore stays `needs_configuration` ("requires an
+ * isolated sandbox runner") unless an operator explicitly opts in with
+ * FACTORY_ALLOW_IN_PROCESS=true (e.g. inside a dedicated, secret-free sandbox).
  */
+
+export const FACTORY_SANDBOX_DETAIL =
+  "Factory requires an isolated sandbox runner: droid exec would run inside the worker process and could read its environment and /run/secrets. Set FACTORY_ALLOW_IN_PROCESS=true only when the worker itself is a secret-free sandbox.";
+
+function inProcessAllowed(): boolean {
+  return setting("FACTORY_ALLOW_IN_PROCESS") === true;
+}
 
 export type ExecResult = { stdout: string; stderr: string; code: number | null; timedOut: boolean };
 export type ExecFn = (file: string, args: string[], opts: { env: NodeJS.ProcessEnv; timeoutMs: number; cwd?: string; signal?: AbortSignal }) => Promise<ExecResult>;
@@ -117,11 +133,12 @@ export class FactoryProvider implements IntelligenceProvider {
   }
 
   isConfigured(): boolean {
-    return Boolean(this.resolveBinary() && envValue("FACTORY_API_KEY"));
+    return inProcessAllowed() && Boolean(this.resolveBinary() && envValue("FACTORY_API_KEY"));
   }
 
-  /** Tenant-aware configuration check (tenant secret → env; binary on PATH). */
+  /** Tenant-aware configuration check (tenant secret → env; binary on PATH; in-process opt-in). */
   async isConfiguredFor(tenantId: string | null): Promise<boolean> {
+    if (!inProcessAllowed()) return false;
     return Boolean(this.resolveBinary() && (await resolveCredential("factory", "FACTORY_API_KEY", tenantId ?? this.opts.tenantId ?? null)));
   }
 
@@ -145,6 +162,7 @@ export class FactoryProvider implements IntelligenceProvider {
   async complete<T>(req: IntelligenceRequest<T>): Promise<IntelligenceResult<T>> {
     const started = Date.now();
     if (req.webSearch) throw new ProviderError("factory", "unsupported", "droid exec runs read-only without web search; route web research to Grok");
+    if (!inProcessAllowed()) throw new ProviderError("factory", "not_configured", FACTORY_SANDBOX_DETAIL);
     const bin = this.resolveBinary();
     const tenantId = this.opts.tenantId ?? req.context?.tenantId ?? null;
     const key = await resolveCredential("factory", "FACTORY_API_KEY", tenantId);
@@ -249,6 +267,7 @@ export class FactoryProvider implements IntelligenceProvider {
 
   async health(): Promise<ProviderHealth> {
     const checkedAt = new Date().toISOString();
+    if (!inProcessAllowed()) return { status: "needs_configuration", detail: FACTORY_SANDBOX_DETAIL, checkedAt, meta: { sandbox: "required", inProcessAllowed: false } };
     const bin = this.resolveBinary();
     const key = await resolveCredential("factory", "FACTORY_API_KEY", this.opts.tenantId ?? null);
     const problems: string[] = [];

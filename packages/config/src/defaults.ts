@@ -12,6 +12,10 @@ export const BUSINESS_DEFAULTS = {
     minExpectedProfitUsd: 300,
     /** Preferred minimum opportunity budget in USD (soft gate). */
     preferredMinBudgetUsd: 300,
+    /** Below this capability fit a profitable brief is downgraded to "consider". */
+    minFitScore: 0.55,
+    /** Below this analysis confidence a profitable brief is downgraded to "consider". */
+    minConfidence: 0.5,
   },
   economics: {
     /** Human-time shadow cost per hour (USD) for owner review/coordination time. */
@@ -57,6 +61,14 @@ export const BUSINESS_DEFAULTS = {
     maxRepairsPerJob: 4,
     /** Max generations per workflow step. */
     maxGenerationsPerStep: 6,
+    /**
+     * Max heavy local-model (GX gx-code) calls per tenant per UTC day. The GX
+     * cluster is shared; beyond this a workspace falls back to triage/mock so a
+     * sign-up flood cannot starve other workspaces (and other GX clients).
+     */
+    dailyLocalModelCalls: 150,
+    /** Max background GX refinements of pursue candidates per tenant per hour (highest expected profit first). */
+    maxRefinesPerHour: 6,
   },
   routing: {
     /** Preferred creative provider order before cost/quality scoring. */
@@ -72,6 +84,46 @@ export const BUSINESS_DEFAULTS = {
     refreshIntervalMinutes: 30,
     opportunityMaxAgeHours: 96,
   },
+} as const;
+
+/**
+ * Operational (non-business) constants: engine timing, retry bounds and
+ * safety margins. They are named here — never inlined — and documented in
+ * .ai/DECISIONS.md (D12). Business thresholds stay in BUSINESS_DEFAULTS.
+ */
+export const OPERATIONAL_DEFAULTS = {
+  /** Max steps of one job executing concurrently. */
+  jobParallelism: 2,
+  /** A job's initial spend limit = min(perJobSpendLimitUsd, max(buffered estimate × this, minJobSpendLimitUsd)). */
+  jobSpendBufferMultiplier: 2.5,
+  /** Floor for a job's initial spend limit (USD) so tiny estimates still leave room for one repair. */
+  minJobSpendLimitUsd: 10,
+  /** Owner ceiling for setJobSpendLimit when PAID_PROVIDER_DAILY_BUDGET_USD is 0: perJobSpendLimitUsd × this. */
+  spendLimitCeilingMultiplier: 10,
+  /** A running step is declared stuck this long AFTER its queue expiry (the handler is aborted at expiry). */
+  stuckStepGraceMinutes: 15,
+  /** Agent runs still `running` after this are marked abandoned. */
+  staleRunMinutes: 120,
+  /** A delivery still `preparing` after this is re-queued by the job monitor. */
+  stalePreparingDeliveryMinutes: 15,
+  /** Packaging attempts per delivery row inside one delivery-prepare job before it is marked failed. */
+  deliveryPackagingAttempts: 3,
+  /** Job-monitor re-queues of a failed/stale delivery before the owner is alerted instead. */
+  deliveryMonitorRequeues: 5,
+  /** Outbox sweeper: an item idle this long without its follow-up work is re-enqueued. */
+  outboxIdleMinutes: 5,
+  /** Outbox sweeper: re-enqueues per item before the owner is alerted instead. */
+  outboxMaxRequeues: 5,
+  /** Owner reminder when a job waits for client inputs longer than this (deduped per day). */
+  awaitingInputsReminderHours: 24,
+  /** `running` generations older than this are orphans (worker died) and are marked failed. */
+  orphanGenerationMinutes: 60,
+  /** Open spend reservations older than this are released (worker died mid-call). */
+  spendReservationTtlMinutes: 120,
+  /** Router circuit breaker: consecutive availability failures before a family is skipped. */
+  circuitBreakerFailures: 3,
+  /** Router circuit breaker: how long an open circuit skips the family before a half-open probe. */
+  circuitBreakerCooldownSeconds: 60,
 } as const;
 
 /** Initial service families GigPilot understands. Configurable per tenant (Market Lab). */

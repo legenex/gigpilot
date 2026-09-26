@@ -1,6 +1,7 @@
 import { strFromU8, unzipSync } from "fflate";
 import { qaVerdictSchema, type QAFinding, type QAVerdict } from "@gigpilot/contracts";
-import { and, asset, emitEvent, eq, generation, getDb, inArray, qaReview, repair } from "@gigpilot/db";
+import { and, asset, emitEvent, eq, generation, getDb, inArray, qaReview, repair, tenant } from "@gigpilot/db";
+import { wrapUntrusted } from "@gigpilot/providers";
 import { storageOf, type AgentDeps } from "../deps";
 import { requiredSections } from "../heuristics/content";
 import { REVIEWABLE_KINDS } from "../heuristics/workflows";
@@ -185,7 +186,9 @@ export async function deterministicChecks(deps: AgentDeps, j: JobRow, step: Step
         if (!names.some((n) => /readme\.md$/i.test(n))) res.findings.push({ code: "missing_readme", severity: "major", message: "Archive has no README.md", criterion: criterion(step, /readme/i), repairHint: "Add setup and usage documentation" });
         if (names.filter((n) => /\.(ts|tsx|js|py|json)$/.test(n)).length < 2) res.findings.push({ code: "missing_source", severity: "critical", message: "Archive contains no source files", repairHint: "Include the implementation" });
         const reportFile = names.find((n) => n.endsWith("test-report.json"));
-        const report = reportFile ? (JSON.parse(strFromU8(files[reportFile]!)) as { failed?: number; passed?: number; tests?: { name: string; status: string; error?: string }[] }) : null;
+        const report = reportFile
+          ? (JSON.parse(strFromU8(files[reportFile]!)) as { failed?: number; passed?: number; simulated?: boolean; tests?: { name: string; status: string; error?: string }[] })
+          : null;
         if (!report) res.findings.push({ code: "missing_tests", severity: "major", message: "No test report in the archive", criterion: criterion(step, /test/i), repairHint: "Add tests and a test report" });
         else if ((report.failed ?? 0) > 0) {
           const failing = (report.tests ?? []).filter((t) => t.status === "failed");
@@ -196,6 +199,10 @@ export async function deterministicChecks(deps: AgentDeps, j: JobRow, step: Step
             criterion: criterion(step, /tests? pass/i),
             repairHint: `Fix the failing test${report.failed === 1 ? "" : "s"}: ${failing.map((t) => t.name).join(", ")}`,
           });
+        } else if (report.simulated === true || !Array.isArray(report.tests) || report.tests.length === 0) {
+          // Self-reported results are not evidence: never claim "N tests passing" for a simulated run.
+          res.findings.push(testsNotExecuted());
+          res.evidence.push("tests generated but not executed in this environment");
         } else res.evidence.push(`${report.passed ?? 0} tests passing`);
         const secretLike = names.find((n) => /(^|\/)\.env$/.test(n));
         if (secretLike) res.findings.push({ code: "secret_file", severity: "critical", message: "Archive contains a .env file", repairHint: "Remove secrets; ship .env.example only" });
@@ -207,10 +214,14 @@ export async function deterministicChecks(deps: AgentDeps, j: JobRow, step: Step
   }
 
   if (step.kind === "test") {
-    const report = out.testReport as { failed?: number; passed?: number } | null | undefined;
+    const report = out.testReport as { failed?: number; passed?: number; simulated?: boolean; tests?: unknown[] } | null | undefined;
     res.checked++;
     if (!report) res.findings.push({ code: "missing_tests", severity: "major", message: "No test results recorded", repairHint: "Run the test suite" });
     else if ((report.failed ?? 0) > 0) res.findings.push({ code: "failing_tests", severity: "major", message: `Test run reports ${report.failed} failure(s)`, repairHint: "Fix the failing tests upstream" });
+    else if (report.simulated === true || !Array.isArray(report.tests) || report.tests.length === 0) {
+      res.findings.push(testsNotExecuted());
+      res.evidence.push("tests generated but not executed in this environment");
+    }
     return res;
   }
 
@@ -247,6 +258,52 @@ export async function deterministicChecks(deps: AgentDeps, j: JobRow, step: Step
   return res;
 }
 
+/** QA finding for a code/test step whose test report carries no execution evidence. */
+export function testsNotExecuted(): QAFinding {
+  return {
+    code: "tests_not_executed",
+    severity: "minor",
+    message: "Tests were generated but not executed in this environment — results are self-reported and unverified",
+    repairHint: "Run the test suite in a real environment (npm test) before relying on it",
+  };
+}
+
+/**
+ * Live workspaces must never silently ship simulated work: a deliverable
+ * produced by the mock provider gets a MAJOR finding (fails QA → owner).
+ */
+export function mockProductionFindings(step: StepRow): { findings: QAFinding[]; failingUnits: number[]; failingGenerationIds: string[] } {
+  const out = outputOf(step);
+  const findings: QAFinding[] = [];
+  const failingUnits: number[] = [];
+  const failingGenerationIds: string[] = [];
+  if (step.kind === "generate") {
+    const items = (out.items as { unitIndex: number; generationId: string; mode?: string; provider?: string }[] | undefined) ?? [];
+    for (const i of items) {
+      if (i.mode === "mock" || i.provider === "mock") {
+        failingUnits.push(i.unitIndex);
+        failingGenerationIds.push(i.generationId);
+      }
+    }
+    if (failingUnits.length) {
+      findings.push({
+        code: "produced_by_mock",
+        severity: "major",
+        message: `${failingUnits.length} of ${items.length} creatives were rendered by the mock provider (simulated placeholders, not deliverable work)`,
+        repairHint: "Configure a creative provider (and paid spend) so the units can be generated for real",
+      });
+    }
+  } else if (out.provider === "mock") {
+    findings.push({
+      code: "produced_by_mock",
+      severity: "major",
+      message: `${step.name} was produced by the deterministic mock provider (no model was available) — not deliverable work for a live workspace`,
+      repairHint: "Configure an intelligence provider (GX or Factory) and re-run the step",
+    });
+  }
+  return { findings, failingUnits, failingGenerationIds };
+}
+
 export function deterministicVerdict(check: StepCheck, stepName: string): QAVerdict {
   const major = check.findings.filter((f) => f.severity === "major").length;
   const critical = check.findings.filter((f) => f.severity === "critical").length;
@@ -276,9 +333,18 @@ export async function runQaStep(ctx: RunContext, j: JobRow, qaStep: StepRow, all
   const upstream = upstreamOf(qaStep, all);
   const targets = all.filter((s) => upstream.has(s.key) && REVIEWABLE_KINDS.has(s.kind) && s.status === "succeeded");
   const reviews: StepReview[] = [];
+  const [t] = await db.select({ mode: tenant.mode }).from(tenant).where(eq(tenant.id, j.tenantId)).limit(1);
+  const live = t?.mode === "live";
 
   for (const s of targets) {
+    await ctx.checkpoint();
     const check = await deterministicChecks(deps, j, s);
+    if (live) {
+      const mock = mockProductionFindings(s);
+      check.findings.push(...mock.findings);
+      for (const u of mock.failingUnits) if (!check.failingUnits.includes(u)) check.failingUnits.push(u);
+      for (const g of mock.failingGenerationIds) if (!check.failingGenerationIds.includes(g)) check.failingGenerationIds.push(g);
+    }
     const baseline = deterministicVerdict(check, s.name);
     const producer = typeof outputOf(s).provider === "string" ? (outputOf(s).provider as string) : s.provider;
     const excerpt = typeof outputOf(s).markdown === "string" ? truncate(outputOf(s).markdown as string, 1500) : JSON.stringify(outputOf(s).testReport ?? outputOf(s).items ?? {}).slice(0, 1500);
@@ -300,11 +366,10 @@ export async function runQaStep(ctx: RunContext, j: JobRow, qaStep: StepRow, all
           {
             role: "user",
             content: [
-              `Job: ${j.title}`,
               `Step: ${s.name} (${s.kind})`,
-              `Acceptance criteria: ${[...s.acceptance].join("; ") || "as briefed"}`,
               `Deterministic checks: ${check.findings.length ? check.findings.map((f) => `[${f.severity}] ${f.message}`).join("; ") : "all passed"} (${check.evidence.slice(0, 6).join(", ")})`,
-              `Output excerpt:\n${excerpt}`,
+              wrapUntrusted("job and acceptance criteria", `Job: ${j.title}\nAcceptance criteria: ${[...s.acceptance].join("; ") || "as briefed"}`),
+              `Output excerpt (the work under review):\n${wrapUntrusted("output excerpt", excerpt)}`,
             ].join("\n"),
           },
         ],

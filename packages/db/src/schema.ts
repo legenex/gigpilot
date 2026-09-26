@@ -330,7 +330,8 @@ export const opportunityAnalysis = pgTable(
     agentRunId: uuid("agent_run_id"),
     createdAt: createdAt(),
   },
-  (t) => [index("opportunity_analysis_opp_idx").on(t.opportunityId, t.version)],
+  // One row per (opportunity, version): concurrent analyses retry with the next version.
+  (t) => [uniqueIndex("opportunity_analysis_opp_version_uq").on(t.opportunityId, t.version)],
 );
 
 export interface CostLineItem {
@@ -520,6 +521,8 @@ export const job = pgTable(
     estimatedCostUsd: usd("estimated_cost_usd").notNull().default(0),
     actualCostUsd: usd("actual_cost_usd").notNull().default(0),
     repairCount: integer("repair_count").notNull().default(0),
+    /** Extra automatic repairs the owner granted on top of settings.limits.maxRepairsPerJob (resumeJob, audited). */
+    extraRepairs: integer("extra_repairs").notNull().default(0),
     acceptanceCriteria: jsonb("acceptance_criteria").$type<string[]>().notNull().default([]),
     brief: text("brief").notNull().default(""),
     dueAt: ts("due_at"),
@@ -699,12 +702,19 @@ export const generation = pgTable(
     repairOfId: uuid("repair_of_id"),
     routeRationale: text("route_rationale"),
     error: text("error"),
+    /** Per-attempt key (`<unitKey>#<n>`): a failed attempt row is never overwritten. */
     idempotencyKey: text("idempotency_key").notNull(),
+    /**
+     * Stable key of the deliverable unit (not attempt-scoped). A succeeded
+     * generation for a unit key is reused on retry instead of paying again.
+     */
+    unitKey: text("unit_key"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
   (t) => [
     uniqueIndex("generation_idem_uq").on(t.tenantId, t.idempotencyKey),
+    index("generation_unit_idx").on(t.tenantId, t.unitKey),
     index("generation_job_idx").on(t.jobId),
     index("generation_provider_idx").on(t.provider, t.model),
   ],
@@ -795,6 +805,10 @@ export const delivery = pgTable(
       .notNull()
       .references(() => job.id, { onDelete: "cascade" }),
     status: text("status").$type<DeliveryState>().notNull().default("preparing"),
+    /** Packaging attempts made for this delivery (bounded; see OPERATIONAL_DEFAULTS). */
+    attempts: integer("attempts").notNull().default(0),
+    /** Last packaging error (secret-free). */
+    error: text("error"),
     packageAssetId: uuid("package_asset_id"),
     manifest: jsonb("manifest").$type<DeliveryManifest>(),
     clientMessage: text("client_message"),
@@ -837,6 +851,36 @@ export const costLedgerEntry = pgTable(
     index("ledger_tenant_created_idx").on(t.tenantId, t.createdAt),
     index("ledger_job_idx").on(t.jobId),
     index("ledger_opp_idx").on(t.opportunityId),
+  ],
+);
+
+/**
+ * Hard spend limits: a paid provider call first reserves its expected cost
+ * (under a per-tenant advisory lock, counting other open reservations), then
+ * settles (actual cost lands in cost_ledger_entry) or releases it.
+ */
+export const spendReservation = pgTable(
+  "spend_reservation",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenant.id, { onDelete: "cascade" }),
+    jobId: uuid("job_id"),
+    stepId: uuid("step_id"),
+    /** e.g. `reservation:<generationId|runId>`. */
+    key: text("key").notNull(),
+    provider: text("provider"),
+    amountUsd: usd("amount_usd").notNull(),
+    status: text("status").$type<"open" | "settled" | "released">().notNull().default("open"),
+    actualUsd: usd("actual_usd"),
+    memo: text("memo").notNull().default(""),
+    createdAt: createdAt(),
+    settledAt: ts("settled_at"),
+  },
+  (t) => [
+    uniqueIndex("spend_reservation_key_uq").on(t.tenantId, t.key),
+    index("spend_reservation_open_idx").on(t.tenantId, t.status, t.createdAt),
   ],
 );
 

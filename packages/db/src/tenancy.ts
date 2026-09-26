@@ -1,8 +1,8 @@
-import { and, eq, gt } from "drizzle-orm";
+import { and, eq, gt, inArray, sql } from "drizzle-orm";
 import { SERVICE_FAMILIES } from "@gigpilot/config/defaults";
 import { INTEGRATIONS, SOURCE_KEYS, defaultTenantSettings, resolveTenantSettings, type TenantSettings } from "@gigpilot/contracts";
 import type { Executor } from "./client";
-import { market, membership, providerIntegration, session, sourceIntegration, tenant } from "./schema";
+import { market, membership, providerIntegration, session, sourceIntegration, tenant, user } from "./schema";
 import { audit } from "./transitions";
 
 const MARKET_KEYWORDS: Record<string, string[]> = {
@@ -144,4 +144,87 @@ export async function listActiveTenantIds(db: Executor, days: number, now: Date 
     .innerJoin(session, eq(session.userId, membership.userId))
     .where(gt(session.updatedAt, since));
   return rows.map((r) => r.id);
+}
+
+// ---------------------------------------------------------------------------
+// Operator workspaces (security review H1)
+// ---------------------------------------------------------------------------
+
+/**
+ * Exact, lower-cased operator emails from OPERATOR_EMAILS (comma list). Only
+ * full addresses count — "@domain" or malformed entries are ignored.
+ */
+export function parseOperatorEmails(raw: string | undefined = process.env.OPERATOR_EMAILS): string[] {
+  return Array.from(
+    new Set(
+      (raw ?? "")
+        .split(",")
+        .map((s) => s.trim().toLowerCase())
+        .filter((s) => /^[^\s@,]+@[^\s@,]+\.[^\s@,]+$/.test(s)),
+    ),
+  );
+}
+
+/** Operator status is cached per tenant for at most this long. */
+export const OPERATOR_CACHE_TTL_MS = 60_000;
+const operatorCache = new Map<string, { value: boolean; expires: number }>();
+
+/** Drop cached operator decisions (tests; after membership changes). */
+export function clearOperatorTenantCache(tenantId?: string): void {
+  if (!tenantId) {
+    operatorCache.clear();
+    return;
+  }
+  for (const k of operatorCache.keys()) if (k.startsWith(`${tenantId}\u0000`)) operatorCache.delete(k);
+}
+
+/**
+ * True when any owner/admin member of the tenant has an email listed in
+ * OPERATOR_EMAILS. Operator workspaces may use server-wide env credentials
+ * and paid budgets; every other workspace must bring its own credentials.
+ * Cached ≤ 60 s. Fails closed (false) when OPERATOR_EMAILS is empty.
+ */
+export async function isOperatorTenant(db: Executor, tenantId: string, now: number = Date.now()): Promise<boolean> {
+  const emails = parseOperatorEmails();
+  if (emails.length === 0 || !tenantId) return false;
+  const key = `${tenantId}\u0000${emails.join(",")}`;
+  const hit = operatorCache.get(key);
+  if (hit && hit.expires > now) return hit.value;
+  const rows = await db
+    .select({ id: membership.id })
+    .from(membership)
+    .innerJoin(user, eq(user.id, membership.userId))
+    .where(and(eq(membership.tenantId, tenantId), inArray(membership.role, ["owner", "admin"]), inArray(sql`lower(${user.email})`, emails)))
+    .limit(1);
+  const value = rows.length > 0;
+  if (operatorCache.size > 5000) operatorCache.clear();
+  operatorCache.set(key, { value, expires: now + OPERATOR_CACHE_TTL_MS });
+  return value;
+}
+
+/** Server-wide real-money cap (PAID_PROVIDER_DAILY_BUDGET_USD). */
+export function serverPaidBudgetUsd(): number {
+  const n = Number(process.env.PAID_PROVIDER_DAILY_BUDGET_USD ?? 0);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+/** Operator-controlled ceiling for NON-operator workspaces (TENANT_MAX_DAILY_PAID_USD, default 0). */
+export function tenantMaxDailyPaidUsd(): number {
+  const n = Number(process.env.TENANT_MAX_DAILY_PAID_USD ?? 0);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+/**
+ * Highest `limits.dailyPaidSpendLimitUsd` a workspace may configure:
+ * operator workspaces → PAID_PROVIDER_DAILY_BUDGET_USD; everyone else →
+ * min(TENANT_MAX_DAILY_PAID_USD, PAID_PROVIDER_DAILY_BUDGET_USD). Runtime
+ * budget checks should clamp the tenant limit with this value too.
+ */
+export function paidSpendCeilingUsd(operator: boolean): number {
+  const server = serverPaidBudgetUsd();
+  return operator ? server : Math.min(server, tenantMaxDailyPaidUsd());
+}
+
+export async function tenantPaidSpendCeilingUsd(db: Executor, tenantId: string): Promise<number> {
+  return paidSpendCeilingUsd(await isOperatorTenant(db, tenantId));
 }

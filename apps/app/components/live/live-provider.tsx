@@ -15,6 +15,7 @@ interface LiveStore {
 const Ctx = createContext<LiveStore | null>(null);
 
 const MAX_EVENTS = 200;
+const SEEN_MAX = 2000;
 const REFRESH_DEBOUNCE_MS = 900;
 const REFRESH_MIN_INTERVAL_MS = 2500;
 
@@ -84,6 +85,7 @@ export function LiveProvider({ initialSeq, children }: { initialSeq: number; chi
     // The layout re-renders on every refresh with a newer max seq; only the
     // first value seeds the cursor so the stream is never torn down.
     let lastSeq = seedSeq.current;
+    const seenIds = new Set<string>();
     let failures = 0;
 
     const setStatus = (s: LiveStatus) => {
@@ -103,8 +105,15 @@ export function LiveProvider({ initialSeq, children }: { initialSeq: number; chi
       es.addEventListener("agent", (msg) => {
         try {
           const ev = JSON.parse((msg as MessageEvent<string>).data) as LiveEvent;
-          if (ev.seq <= lastSeq) return;
-          lastSeq = ev.seq;
+          // De-duplicate by id, not by seq: the server re-sends a recent overlap window so
+          // events committed out of seq order still arrive (with a seq below lastSeq).
+          if (seenIds.has(ev.id)) return;
+          seenIds.add(ev.id);
+          if (seenIds.size > SEEN_MAX) {
+            const oldest = seenIds.values().next().value;
+            if (oldest !== undefined) seenIds.delete(oldest);
+          }
+          lastSeq = Math.max(lastSeq, ev.seq);
           eventsRef.current = [ev, ...eventsRef.current].slice(0, MAX_EVENTS);
           emit();
           if (shouldRefresh(pathRef.current, ev.type)) scheduleRefresh();

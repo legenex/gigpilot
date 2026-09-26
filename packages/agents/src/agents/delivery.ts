@@ -1,4 +1,5 @@
 import { strToU8, zipSync } from "fflate";
+import { OPERATIONAL_DEFAULTS } from "@gigpilot/config";
 import type { QueuePayloads } from "@gigpilot/contracts";
 import {
   and,
@@ -16,16 +17,17 @@ import {
   qaReview,
   repair,
   revision,
+  sql,
   transition,
   type DeliveryManifest,
 } from "@gigpilot/db";
 import { storageOf, type AgentDeps } from "../deps";
 import { isQaStep } from "../heuristics/workflows";
 import { notify } from "../lib/notify";
-import { money, quote, round4, slugify } from "../lib/util";
+import { money, quote, round4, safeError, slugify } from "../lib/util";
 import { runAgent, storeFile, type AssetRow, type StepRow } from "../runtime";
 import { draftDeliveryNotes } from "./client";
-import { clientNameOf } from "./execution";
+import { clientNameOf, testsUnverified } from "./execution";
 import { loadActiveSteps } from "./orchestrator";
 
 function outputOf(s: StepRow): Record<string, unknown> {
@@ -42,6 +44,12 @@ function stepAssetIds(s: StepRow): string[] {
  * asset with MANIFEST.md, DELIVERY-NOTES.md (drafted, never sent) and a QA
  * summary, stores it as an archive asset, records actual-vs-estimated cost,
  * and parks the job for the owner's final approval.
+ *
+ * Failure handling: every failed packaging attempt moves the delivery to
+ * `failed` (error recorded). Within OPERATIONAL_DEFAULTS.deliveryPackagingAttempts
+ * the error is re-thrown so pg-boss retries (failed → preparing); beyond it
+ * the handler stops and the job monitor re-queues it a bounded number of
+ * times before alerting the owner — a delivery never sits in `preparing`.
  */
 export async function runDeliveryPrepare(payload: QueuePayloads["delivery-prepare"], deps: AgentDeps) {
   const db = getDb();
@@ -56,20 +64,57 @@ export async function runDeliveryPrepare(payload: QueuePayloads["delivery-prepar
   const [existing] = await db
     .select()
     .from(delivery)
-    .where(and(eq(delivery.jobId, j.id), inArray(delivery.status, ["preparing", "prepared"])))
+    .where(and(eq(delivery.jobId, j.id), inArray(delivery.status, ["preparing", "prepared", "failed"])))
     .orderBy(desc(delivery.createdAt))
     .limit(1);
   if (existing?.status === "prepared") return { status: "skipped" as const, reason: "already prepared" };
   const settings = await getTenantSettings(db, tenantId);
+  const finisher = { type: "agent" as const, id: "finisher" };
 
+  let deliveryId = existing?.id;
+  if (!deliveryId) {
+    const [d] = await db.insert(delivery).values({ tenantId, jobId: j.id, status: "preparing" }).returning({ id: delivery.id });
+    deliveryId = d!.id;
+  } else if (existing?.status === "failed") {
+    await transition(db, { machine: "delivery", id: deliveryId, tenantId, to: "preparing", actor: finisher, reason: "retrying delivery packaging" });
+  }
+  const [counted] = await db
+    .update(delivery)
+    .set({ attempts: sql`${delivery.attempts} + 1` })
+    .where(eq(delivery.id, deliveryId))
+    .returning({ attempts: delivery.attempts });
+  const attempts = counted?.attempts ?? 1;
+
+  try {
+    return await packageDelivery(deps, { tenantId, job: j, steps, deliveryId, settings });
+  } catch (err) {
+    const message = safeError(err, 400);
+    await transition(db, {
+      machine: "delivery",
+      id: deliveryId,
+      tenantId,
+      to: "failed",
+      actor: finisher,
+      reason: `packaging failed (attempt ${attempts})`,
+      expectFrom: ["preparing"],
+      patch: { error: message },
+      event: { type: "delivery.failed", level: "error", agent: "finisher", subjectType: "delivery", subjectId: deliveryId, jobId: j.id, message: `Delivery packaging for ${quote(j.title, 50)} failed (attempt ${attempts}): ${message.slice(0, 200)}` },
+    }).catch((inner: unknown) => deps.log.warn({ deliveryId, error: safeError(inner) }, "could not mark delivery failed"));
+    // Within the per-round budget let pg-boss retry with backoff; beyond it the job monitor takes over.
+    if (attempts < OPERATIONAL_DEFAULTS.deliveryPackagingAttempts) throw err;
+    return { status: "failed" as const, deliveryId, attempts, error: message };
+  }
+}
+
+async function packageDelivery(
+  deps: AgentDeps,
+  input: { tenantId: string; job: typeof job.$inferSelect; steps: StepRow[]; deliveryId: string; settings: Awaited<ReturnType<typeof getTenantSettings>> },
+) {
+  const db = getDb();
+  const { tenantId, job: j, steps, deliveryId, settings } = input;
   return runAgent(
     { deps, tenantId, agent: "finisher", task: "delivery.package", subjectType: "job", subjectId: j.id, jobId: j.id, label: `Delivery package for ${quote(j.title)}` },
     async (ctx) => {
-      let deliveryId = existing?.id;
-      if (!deliveryId) {
-        const [d] = await db.insert(delivery).values({ tenantId, jobId: j.id, status: "preparing" }).returning({ id: delivery.id });
-        deliveryId = d!.id;
-      }
       const storage = storageOf(deps);
       const finals = steps.filter((s) => !isQaStep(s));
       const ids = finals.flatMap(stepAssetIds);
@@ -100,7 +145,10 @@ export async function runDeliveryPrepare(payload: QueuePayloads["delivery-prepar
       const repairs = await db.select().from(repair).where(eq(repair.jobId, j.id));
       const doneRepairs = repairs.filter((r) => r.status === "succeeded");
       const passed = [...latestByStep.values()].filter((r) => r.verdict === "pass").length;
-      const qaSummary = `${passed}/${latestByStep.size} deliverable checks passed independent QA${doneRepairs.length ? `, ${doneRepairs.length} repair${doneRepairs.length === 1 ? "" : "s"} applied` : ""}`;
+      // Simulated / self-reported test runs are never presented as "N tests passing".
+      const unverifiedTests = steps.some((s) => (s.kind === "code" || s.kind === "test") && outputOf(s).testReport !== undefined && testsUnverified(outputOf(s).testReport as never));
+      const testsNote = unverifiedTests ? "tests generated but not executed in this environment" : null;
+      const qaSummary = `${passed}/${latestByStep.size} deliverable checks passed independent QA${doneRepairs.length ? `, ${doneRepairs.length} repair${doneRepairs.length === 1 ? "" : "s"} applied` : ""}${testsNote ? `; ${testsNote}` : ""}`;
 
       const [analysisRow] = j.opportunityId
         ? await db.select({ analysis: opportunityAnalysis.analysis }).from(opportunityAnalysis).where(eq(opportunityAnalysis.opportunityId, j.opportunityId)).orderBy(desc(opportunityAnalysis.version)).limit(1)
@@ -135,6 +183,7 @@ export async function runDeliveryPrepare(payload: QueuePayloads["delivery-prepar
           return `- **${step?.name ?? "Step"}** — ${r.verdict.toUpperCase()} (score ${r.score.toFixed(2)}, reviewer ${r.provider ?? "?"}/${r.model ?? "?"}): ${r.summary}`;
         }),
         ...(repairs.length ? ["", "## Repairs", ...repairs.map((r) => `- ${r.strategy} (${r.status}): ${r.rationale}`)] : []),
+        ...(testsNote ? ["", "## Tests", "Automated tests were generated but not executed in this environment (self-reported, unverified). Run `npm test` in the project to verify before relying on them."] : []),
       ].join("\n");
       files["MANIFEST.md"] = strToU8(manifestMd);
       files["DELIVERY-NOTES.md"] = strToU8(`# ${notes.subject}\n\n${notes.message}\n\n---\nDraft prepared by GigPilot's Client Agent — not sent. Review before sharing.\n`);

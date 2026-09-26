@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { OpportunityAnalysis } from "@gigpilot/contracts";
+import { wrapUntrusted } from "@gigpilot/providers";
 import { familyLabel } from "../lib/util";
 import { callIntelligence, type JobRow, type RunContext } from "../runtime";
 
@@ -62,9 +63,10 @@ export async function draftDeliveryNotes(ctx: RunContext, input: Parameters<type
     messages: [
       {
         role: "system",
-        content: "Draft a concise, friendly delivery note to a freelance client. Mention what is included and how quality was checked. No invented facts. Return JSON {subject, message}.",
+        content:
+          "Draft a concise, friendly delivery note to a freelance client. Mention what is included and how quality was checked. No invented facts; keep every fact (file names, QA results, test status) exactly as in the draft. Return JSON {subject, message}.",
       },
-      { role: "user", content: fallback.message },
+      { role: "user", content: `Rewrite this draft:\n${wrapUntrusted("draft delivery note", fallback.message)}` },
     ],
     mockResult: () => fallback,
   });

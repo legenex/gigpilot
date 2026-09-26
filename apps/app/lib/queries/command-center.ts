@@ -1,6 +1,8 @@
 import "server-only";
 import { getDb, getTenantSettings, sql } from "@gigpilot/db";
 import type { TenantSettings } from "@gigpilot/contracts";
+import { pausedStepsSummary } from "../job-blockers";
+import { OWNER_BLOCK_REASONS_SQL } from "./jobs";
 
 type Row = Record<string, unknown>;
 async function q<T extends Row>(query: ReturnType<typeof sql>): Promise<T[]> {
@@ -9,7 +11,7 @@ async function q<T extends Row>(query: ReturnType<typeof sql>): Promise<T[]> {
 const n = (v: unknown): number => (v === null || v === undefined ? 0 : Number(v));
 
 export interface NeedsYouItem {
-  kind: "proposal" | "delivery" | "pursue" | "submit";
+  kind: "proposal" | "delivery" | "pursue" | "submit" | "inputs" | "blocked";
   id: string;
   title: string;
   detail: string;
@@ -45,7 +47,7 @@ export interface CommandCenterData {
 
 export async function getCommandCenter(tenantId: string): Promise<CommandCenterData> {
   const t = tenantId;
-  const [settings, counts, pipeline, spend, accuracy, touch, daily, funnel, agents, notifs, production, proposals, deliveries, pursue, submits] = await Promise.all([
+  const [settings, counts, pipeline, spend, accuracy, touch, daily, funnel, agents, notifs, production, proposals, deliveries, pursue, submits, blocked] = await Promise.all([
     getTenantSettings(getDb(), t),
     q(sql`
       select
@@ -150,10 +152,35 @@ export async function getCommandCenter(tenantId: string): Promise<CommandCenterD
       select a.id, a.price_usd::float8 as price, a.updated_at, o.title, o.source_key from application a join opportunity o on o.id = a.opportunity_id
       where a.tenant_id = ${t} and a.status = 'approved' and a.submission_mode <> 'api' order by a.updated_at desc limit 3
     `),
+    // Dead-end production states that only the owner can clear (confirm inputs / authorise attempt / raise spend limit).
+    q(sql`
+      select j.id, j.title, j.status, j.price_usd::float8 as price, j.updated_at,
+        (select count(*) from workflow_step s where s.job_id = j.id and s.status = 'blocked' and s.output->>'blockedReason' in ${OWNER_BLOCK_REASONS_SQL})::int as owner_blocked,
+        (select string_agg(distinct s.output->>'blockedReason', ',') from workflow_step s where s.job_id = j.id and s.status = 'blocked' and s.output->>'blockedReason' in ${OWNER_BLOCK_REASONS_SQL}) as reasons
+      from job j
+      where j.tenant_id = ${t} and j.status in ('awaiting_inputs','ready','executing','qa','repairing')
+        and (j.status = 'awaiting_inputs' or exists (
+          select 1 from workflow_step s where s.job_id = j.id and s.status = 'blocked' and s.output->>'blockedReason' in ${OWNER_BLOCK_REASONS_SQL}
+        ))
+      order by j.updated_at desc limit 5
+    `),
   ]);
 
   const c = counts[0] ?? {};
   const needsYou: NeedsYouItem[] = [
+    ...blocked.map((r) => {
+      const inputs = r.status === "awaiting_inputs";
+      const nBlocked = n(r.owner_blocked);
+      return {
+        kind: inputs ? ("inputs" as const) : ("blocked" as const),
+        id: String(r.id),
+        title: String(r.title),
+        detail: inputs ? "Production waits for you to confirm the inputs" : pausedStepsSummary(nBlocked, r.reasons ? String(r.reasons).split(",") : []),
+        href: `/jobs/${r.id}`,
+        amountUsd: n(r.price),
+        at: new Date(r.updated_at as string),
+      };
+    }),
     ...deliveries.map((r) => ({
       kind: "delivery" as const,
       id: String(r.id),

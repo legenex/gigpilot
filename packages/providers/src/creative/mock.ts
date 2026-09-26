@@ -1,4 +1,5 @@
 import type { Capability, CreativeModelOption, CreativeOutput, CreativeProvider, CreativeRequest, ProviderHealth } from "@gigpilot/contracts";
+import { ProviderError } from "../lib/errors";
 import { unitsFor } from "@gigpilot/economics";
 
 /**
@@ -373,6 +374,7 @@ export class MockCreativeProvider implements CreativeProvider {
   /** Render with an explicit simulated defect (used by the broker). */
   async render(req: CreativeRequest, option: CreativeModelOption, simulateDefect: string | null | undefined): Promise<CreativeOutput> {
     const started = Date.now();
+    if (req.signal?.aborted) throw new ProviderError("mock", "timeout", "aborted before rendering");
     const defect = (["aspect_ratio", "missing_logo_safe_zone", "text_overflow"] as const).find((d) => d === simulateDefect) ?? null;
     const requested: AspectRatio = req.aspectRatio ?? (req.capability.startsWith("video.") ? "9:16" : "1:1");
     const actualAspect = defect === "aspect_ratio" ? WRONG_ASPECT[requested] : requested;

@@ -19,6 +19,7 @@ gen() { # gen <file> <cmd>
   if [[ ! -s "$f" ]]; then (umask 077; eval "$2" > "$f"); echo "generated secret: $1"; fi
 }
 gen postgres_password "openssl rand -hex 24"
+gen postgres_app_password "openssl rand -hex 24"
 gen better_auth_secret "openssl rand -base64 48 | tr -d '\n'"
 gen encryption_key "openssl rand -base64 32 | tr -d '\n'"
 gen agentos_supervision_token "openssl rand -hex 32"
@@ -48,6 +49,12 @@ STORAGE_DRIVER=filesystem
 WORKER_SCHEDULES_ENABLED=true
 # Real-money guardrail — paid providers stay off while this is 0.
 PAID_PROVIDER_DAILY_BUDGET_USD=0
+# Operator workspaces (exact owner emails) may use server-wide credentials.
+OPERATOR_EMAILS=
+# Paid-spend ceiling for non-operator workspaces (0 = none).
+TENANT_MAX_DAILY_PAID_USD=0
+# GigPilot's share of gx-code (1 slot per node, shared with AgentOS).
+GX_CODE_MAX_CONCURRENCY=1
 CONF
   chmod 644 "$RT/config/gigpilot.env"
   echo "wrote $RT/config/gigpilot.env"
@@ -56,11 +63,13 @@ fi
 docker volume inspect gigpilot_pgdata >/dev/null 2>&1 || docker volume create gigpilot_pgdata >/dev/null
 docker volume inspect gigpilot_storage >/dev/null 2>&1 || docker volume create gigpilot_storage >/dev/null
 
-install -m 0755 "$REPO/ops/gx10-01/bin/ts-proxy.sh" "$SHARE/bin/ts-proxy.sh"
 install -m 0755 "$REPO/ops/gx10-01/scripts/backup.sh" "$SHARE/bin/backup.sh"
-install -m 0644 "$REPO/ops/gx10-01/systemd/gigpilot-ts-proxy@.service" "$UNITS/"
 install -m 0644 "$REPO/ops/gx10-01/systemd/gigpilot-backup.service" "$UNITS/"
 install -m 0644 "$REPO/ops/gx10-01/systemd/gigpilot-backup.timer" "$UNITS/"
 systemctl --user daemon-reload
-systemctl --user enable --now gigpilot-ts-proxy@4710.service gigpilot-ts-proxy@4711.service gigpilot-backup.timer
+# Tailscale exposure is the compose `edge` service (Caddy); retire legacy socat units.
+for u in gigpilot-ts-proxy@4710 gigpilot-ts-proxy@4711; do systemctl --user disable --now "$u" >/dev/null 2>&1 || true; done
+rm -f "$UNITS/gigpilot-ts-proxy@.service" "$SHARE/bin/ts-proxy.sh"
+systemctl --user daemon-reload
+systemctl --user enable --now gigpilot-backup.timer
 echo "host setup complete"

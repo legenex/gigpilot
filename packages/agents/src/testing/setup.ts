@@ -56,6 +56,8 @@ export function applyTestEnv(): void {
   process.env.DATABASE_URL = testDatabaseUrl();
   process.env.GIGPILOT_SERVICE = "gigpilot-test";
   process.env.PAID_PROVIDER_DAILY_BUDGET_USD = "0";
+  process.env.TENANT_MAX_DAILY_PAID_USD = "0";
+  process.env.OPERATOR_EMAILS = "";
   process.env.WORKER_SCHEDULES_ENABLED = "false";
   process.env.STORAGE_DRIVER = "filesystem";
   // One storage dir per test run (forks share the vitest parent pid); stale runs are pruned.

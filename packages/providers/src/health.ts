@@ -26,7 +26,7 @@ import { WebFeedSource } from "./sources/web";
  *   higgsfield POST /estimate/higgsfield-ai/soul/v2/standard (free estimate)
  *   upwork     token presence; minimal authorized `user { id }` query when a token exists
  *   freelancer GET /users/0.1/self/
- *   contra/fiverr  inbound webhook secret presence (no API exists)
+ *   contra/fiverr  the workspace's inbound webhook secret presence (no API exists)
  *   web        cached feed state only (feeds have strict request budgets)
  *   direct     always connected
  *   mock       demo/test mode
@@ -52,9 +52,9 @@ async function run(key: string, tenantId: string | null): Promise<ProviderHealth
     case "freelancer":
       return new FreelancerSource().withTenant(tenantId).health();
     case "contra":
-      return new ContraSource().health();
+      return new ContraSource().withTenant(tenantId).health();
     case "fiverr":
-      return new FiverrSource().health();
+      return new FiverrSource().withTenant(tenantId).health();
     case "web":
       return new WebFeedSource().health();
     case "direct":

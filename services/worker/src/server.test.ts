@@ -2,10 +2,11 @@ import "../../../packages/agents/src/testing/setup";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { closeDb } from "@gigpilot/db";
-import { migrateTestDb, resetDb } from "../../../packages/agents/src/testing/harness";
+import { closeDb, delivery, eq, getDb, job, workflowStep } from "@gigpilot/db";
+import { AUTOMATION_BRIEF, createTestTenant, migrateTestDb, resetDb, testDeps, wonJob } from "../../../packages/agents/src/testing/harness";
+import { CONCURRENCY } from "./schedules";
 import { bearerMatches, startHealthServer, TRIGGER_ALLOWLIST, type SupervisionDeps } from "./server";
-import { buildSnapshot, createErrorRing, pendingItems } from "./status";
+import { buildSnapshot, createErrorRing, migrationState, pendingItems, queueHealthy } from "./status";
 
 const TOKEN = "test-supervision-token-0123456789";
 
@@ -96,6 +97,42 @@ describe("worker health & supervision API", () => {
     } finally {
       server.close();
     }
+  });
+
+  it("pending items surface every owner escalation (inputs, blocked steps, repair limit, failed/stuck deliveries)", async () => {
+    const db = getDb();
+    const t = await createTestTenant();
+    const deps = testDeps();
+    const jobId = await wonJob(t, deps, AUTOMATION_BRIEF, { plan: true });
+    const steps = await db.select().from(workflowStep).where(eq(workflowStep.jobId, jobId));
+    const [a, b, qa] = [steps[0]!, steps[1]!, steps.find((s) => s.agent === "qa")!];
+    await db.update(job).set({ status: "executing" }).where(eq(job.id, jobId));
+    await db.update(workflowStep).set({ status: "blocked", output: { blockedReason: "budget" } }).where(eq(workflowStep.id, a.id));
+    await db.update(workflowStep).set({ status: "blocked", output: { blockedReason: "attempts_exhausted" } }).where(eq(workflowStep.id, b.id));
+    await db.update(workflowStep).set({ status: "blocked", output: { blockedReason: "repair_limit" } }).where(eq(workflowStep.id, qa.id));
+    await db.insert(delivery).values({ tenantId: t.tenantId, jobId, status: "failed", attempts: 3 });
+    await db.insert(delivery).values({ tenantId: t.tenantId, jobId, status: "preparing", attempts: 1, updatedAt: new Date(Date.now() - 60 * 60_000) });
+    const waiting = await wonJob(t, deps, { ...AUTOMATION_BRIEF, title: "Another automation job" });
+    await db.update(job).set({ status: "awaiting_inputs" }).where(eq(job.id, waiting));
+
+    const items = await pendingItems();
+    const kinds = items.map((i) => i.kind);
+    for (const k of ["awaiting_inputs", "blocked_step", "repair_limit", "delivery_failed", "delivery_stuck"]) expect(kinds).toContain(k);
+    expect(items.filter((i) => i.kind === "blocked_step")).toHaveLength(2);
+    expect(JSON.stringify(items)).not.toContain(AUTOMATION_BRIEF.title); // ids/counts only
+    const snap = await buildSnapshot(null, createErrorRing(), { bossStarted: true });
+    expect(snap.pending.approvals).toBeGreaterThanOrEqual(5);
+  });
+
+  it("readiness reflects the live schema (bundled migrations applied) and queue reachability", async () => {
+    expect(await migrationState()).toMatchObject({ ok: true });
+    // The test database has no pg-boss schema: the cheap live queue query must fail, not pass silently.
+    expect(await queueHealthy()).toBe(false);
+  });
+
+  it("keeps background refinement on a single worker slot so production steps are never starved", () => {
+    expect(CONCURRENCY["opportunity-refine"]).toBe(1);
+    expect(CONCURRENCY["step-execute"]).toBeGreaterThan(CONCURRENCY["opportunity-refine"]);
   });
 
   it("compares tokens in constant time over digests", () => {

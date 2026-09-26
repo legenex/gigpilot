@@ -11,9 +11,12 @@ import { decodeEntities, extractHrefs, htmlToText, oneLine } from "./text";
  * RawOpportunity. It never fetches anything, never follows links and never
  * retains HTML (bodies are converted to plain text).
  *
- * Webhook authenticity: `verifyInboundSignature(body, header, secret)` —
- * HMAC-SHA256 over the raw request body, hex, timing-safe compare, using
- * INBOUND_WEBHOOK_SECRET. Accepts "sha256=<hex>" or bare "<hex>".
+ * Webhook authenticity (per-tenant secret, security review M3):
+ *   x-gigpilot-timestamp: <unix seconds>
+ *   x-gigpilot-signature: hex(HMAC-SHA256(secret, `${timestamp}.${tenantSlug}.${provider}.${rawBody}`))
+ * The secret is the workspace's own INBOUND_WEBHOOK_SECRET (stored encrypted,
+ * generated in Integrations). Requests older/newer than ±300 s are rejected
+ * and the route stores sha256(signature) to refuse replays.
  */
 
 export type InboundProvider = "contra" | "fiverr" | "upwork" | "generic";
@@ -196,19 +199,62 @@ export function parseInboundNotification(n: InboundNotification): RawOpportunity
   };
 }
 
-/**
- * Verify an inbound webhook: header = hex(HMAC-SHA256(rawBody, secret)),
- * optionally prefixed "sha256=". Timing-safe. False when the secret is unset.
- */
-export function verifyInboundSignature(body: string | Uint8Array, signatureHeader: string | null | undefined, secret: string | null | undefined): boolean {
-  if (!secret || !signatureHeader) return false;
-  const provided = signatureHeader.trim().replace(/^sha256=/i, "").toLowerCase();
-  if (!/^[0-9a-f]{64}$/.test(provided)) return false;
-  const expected = createHmac("sha256", secret).update(typeof body === "string" ? Buffer.from(body, "utf8") : Buffer.from(body)).digest("hex");
-  return timingSafeEqual(Buffer.from(expected, "hex"), Buffer.from(provided, "hex"));
+export const INBOUND_TIMESTAMP_HEADER = "x-gigpilot-timestamp";
+export const INBOUND_SIGNATURE_HEADER = "x-gigpilot-signature";
+/** Maximum |now − timestamp| accepted, in seconds. */
+export const INBOUND_MAX_SKEW_SECONDS = 300;
+
+export interface InboundSignatureInput {
+  /** Unix seconds, exactly as sent in x-gigpilot-timestamp. */
+  timestamp: string | number;
+  tenantSlug: string;
+  provider: string;
+  /** The raw request body bytes/text, unmodified. */
+  body: string | Uint8Array;
 }
 
-/** Sign a body (for tests and for configuring email-forwarding relays). */
-export function signInboundBody(body: string | Uint8Array, secret: string): string {
-  return `sha256=${createHmac("sha256", secret).update(typeof body === "string" ? Buffer.from(body, "utf8") : Buffer.from(body)).digest("hex")}`;
+/** The exact bytes that are signed: `${timestamp}.${tenantSlug}.${provider}.${rawBody}`. */
+export function inboundSignedPayload(input: InboundSignatureInput): Buffer {
+  const prefix = Buffer.from(`${String(input.timestamp)}.${input.tenantSlug}.${input.provider}.`, "utf8");
+  const body = typeof input.body === "string" ? Buffer.from(input.body, "utf8") : Buffer.from(input.body);
+  return Buffer.concat([prefix, body]);
+}
+
+/** hex(HMAC-SHA256(secret, signed payload)) — for relays, tests and docs. */
+export function signInboundBody(input: InboundSignatureInput, secret: string): string {
+  return createHmac("sha256", secret).update(inboundSignedPayload(input)).digest("hex");
+}
+
+export type InboundVerifyResult = { ok: true; signatureHash: string } | { ok: false; reason: "missing" | "malformed" | "skew" | "mismatch" };
+
+/** Reject quickly (before any tenant lookup) when the timestamp is missing, malformed or outside the window. */
+export function checkInboundTimestamp(timestamp: string | null | undefined, nowMs: number = Date.now(), maxSkewSeconds = INBOUND_MAX_SKEW_SECONDS): InboundVerifyResult | null {
+  if (!timestamp) return { ok: false, reason: "missing" };
+  if (!/^\d{1,12}$/.test(timestamp.trim())) return { ok: false, reason: "malformed" };
+  const ts = Number(timestamp.trim());
+  if (Math.abs(nowMs / 1000 - ts) > maxSkewSeconds) return { ok: false, reason: "skew" };
+  return null;
+}
+
+/** sha256(lower-case hex signature) — the replay-ledger key component. */
+export function inboundSignatureHash(signatureHex: string): string {
+  return createHash("sha256").update(signatureHex.trim().toLowerCase().replace(/^sha256=/, "")).digest("hex");
+}
+
+/**
+ * Verify a signed inbound webhook. Timing-safe; false when the secret or any
+ * header is missing. On success returns sha256(signature) for replay checks.
+ */
+export function verifyInboundSignature(
+  input: Omit<InboundSignatureInput, "timestamp"> & { signature: string | null | undefined; timestamp: string | number | null | undefined; secret: string | null | undefined; nowMs?: number; maxSkewSeconds?: number },
+): InboundVerifyResult {
+  const ts = typeof input.timestamp === "string" ? input.timestamp.trim() : input.timestamp;
+  const early = checkInboundTimestamp(ts === null || ts === undefined ? undefined : String(ts), input.nowMs, input.maxSkewSeconds);
+  if (early) return early;
+  if (!input.secret || !input.signature) return { ok: false, reason: "missing" };
+  const provided = input.signature.trim().toLowerCase().replace(/^sha256=/, "");
+  if (!/^[0-9a-f]{64}$/.test(provided)) return { ok: false, reason: "malformed" };
+  const expected = signInboundBody({ timestamp: String(ts), tenantSlug: input.tenantSlug, provider: input.provider, body: input.body }, input.secret);
+  if (!timingSafeEqual(Buffer.from(expected, "hex"), Buffer.from(provided, "hex"))) return { ok: false, reason: "mismatch" };
+  return { ok: true, signatureHash: inboundSignatureHash(provided) };
 }

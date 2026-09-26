@@ -1,5 +1,5 @@
 import "server-only";
-import { agentEvent, and, desc, eq, getDb, gt, asc, or } from "@gigpilot/db";
+import { agentEvent, and, desc, eq, getDb, gt, asc, lte, or, sql } from "@gigpilot/db";
 
 type SQL = ReturnType<typeof eq>;
 import type { LiveEvent } from "../live-types";
@@ -43,5 +43,32 @@ export async function listEventsAfter(tenantId: string, afterSeq: number, limit 
     .where(and(eq(agentEvent.tenantId, tenantId), gt(agentEvent.seq, afterSeq)))
     .orderBy(asc(agentEvent.seq))
     .limit(limit);
+  return rows.map(toLive);
+}
+
+/**
+ * Late commits: `seq` comes from a sequence, so a transaction that took its
+ * seq earlier can commit AFTER a higher seq was already streamed. A pure
+ * `seq > cursor` query would skip it forever. This returns rows at or below
+ * the cursor (within `overlap` seqs) created in the last `windowSeconds`;
+ * the stream de-duplicates them by event id.
+ */
+export async function listLateEvents(tenantId: string, cursor: number, opts: { overlap?: number; windowSeconds?: number; limit?: number } = {}): Promise<LiveEvent[]> {
+  const overlap = opts.overlap ?? 500;
+  const windowSeconds = opts.windowSeconds ?? 60;
+  if (cursor <= 0) return [];
+  const rows = await getDb()
+    .select()
+    .from(agentEvent)
+    .where(
+      and(
+        eq(agentEvent.tenantId, tenantId),
+        gt(agentEvent.seq, Math.max(0, cursor - overlap)),
+        lte(agentEvent.seq, cursor),
+        gt(agentEvent.createdAt, sql`now() - make_interval(secs => ${windowSeconds})`),
+      ),
+    )
+    .orderBy(asc(agentEvent.seq))
+    .limit(opts.limit ?? overlap);
   return rows.map(toLive);
 }

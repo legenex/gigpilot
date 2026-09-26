@@ -2,6 +2,9 @@ import type { CreativeModelOption, OpportunityAnalysis, TenantSettings } from "@
 import { calculateEconomics, type EconomicsResult, type LineItemInput } from "./calculator";
 import { CREATIVE_CATALOG, creativeOptionsFor, inferenceCostUsd, unitsFor } from "./catalog";
 
+/** Capabilities fulfilled by model calls and therefore priced via inference estimates. */
+const INFERENCE_DELIVERED = new Set<string>(["text.copy", "text.translate", "text.research", "code.build", "code.automation", "qa.review"]);
+
 export interface RouteChoice {
   option: CreativeModelOption;
   expectedCostPerUsableUsd: number | null;
@@ -113,8 +116,36 @@ export function estimateOpportunity(
         attempts: est.attemptsPerUnit,
         priceSource: route?.option.priceVerifiedAt ? `catalog ${route.option.priceVerifiedAt}` : "unknown",
       });
+    } else if (INFERENCE_DELIVERED.has(est.capability)) {
+      // Delivered by model calls (copy, research, translation, code, review): priced
+      // through analysis.inferenceEstimates below, so no separate line item here.
+    } else if (est.capability === "media.finishing") {
+      // Assembly/formatting runs on local tooling (no per-unit provider charge).
+      lineItems.push({
+        category: "tool",
+        label: est.label,
+        provider: "local",
+        model: null,
+        unit: "unit",
+        unitCostUsd: 0,
+        quantity: est.units,
+        attempts: est.attemptsPerUnit,
+        priceSource: "local tooling",
+      });
     } else {
-      // Non-creative production (code, copy, research…) is priced as inference below.
+      // No priced route exists (e.g. audio voiceover/dubbing): never price it at $0 —
+      // keep the line item unpriced so the estimate is flagged incomplete.
+      lineItems.push({
+        category: "tool",
+        label: est.label,
+        provider: null,
+        model: est.capability,
+        unit: "unit",
+        unitCostUsd: null,
+        quantity: est.units,
+        attempts: est.attemptsPerUnit,
+        priceSource: "no priced route in catalog",
+      });
     }
   }
 
@@ -134,7 +165,7 @@ export function estimateOpportunity(
     });
   }
 
-  const fee = settings.economics.platformFees[opp.sourceKey] ?? settings.economics.platformFees["direct"] ?? { pct: 0, fixedUsd: 0, minUsd: 0 };
+  const fee = settings.economics.platformFees[opp.sourceKey] ?? null;
 
   const economics = calculateEconomics({
     price: {
@@ -146,7 +177,7 @@ export function estimateOpportunity(
       hourlyRateUsd: settings.economics.defaultHourlyRateUsd,
     },
     lineItems,
-    platformFee: { key: opp.sourceKey, pct: fee.pct, fixedUsd: fee.fixedUsd, minUsd: fee.minUsd },
+    platformFee: fee ? { key: opp.sourceKey, pct: fee.pct, fixedUsd: fee.fixedUsd, minUsd: fee.minUsd } : null,
     revision: { expectedRounds: settings.economics.expectedRevisionRounds, costFraction: settings.economics.revisionCostFraction },
     contingencyPct: settings.economics.contingencyPct,
     shadow: { hours: analysis.humanHours, hourlyRateUsd: settings.economics.shadowHourlyRateUsd },

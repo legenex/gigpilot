@@ -1,25 +1,65 @@
 import { describe, expect, it } from "vitest";
-import { parseBudget, parseInboundNotification, signInboundBody, verifyInboundSignature } from "./inbound";
+import { checkInboundTimestamp, inboundSignatureHash, inboundSignedPayload, parseBudget, parseInboundNotification, signInboundBody, verifyInboundSignature } from "./inbound";
 import { parseFeed } from "./rss";
 
-describe("verifyInboundSignature", () => {
-  const secret = "whsec_test_123";
+describe("verifyInboundSignature (timestamped, tenant-bound)", () => {
+  const secret = "gpwh_test_secret_0123456789abcdef"; // gitleaks:allow — fake fixture, not a credential
   const body = JSON.stringify({ subject: "New brief", text: "hello" });
+  const now = 1_790_000_000_000; // ms
+  const ts = String(now / 1000);
+  const base = { tenantSlug: "acme-1a2b3c", provider: "contra", body, timestamp: ts };
+  const sign = (over: Partial<typeof base> = {}, s = secret) => signInboundBody({ ...base, ...over }, s);
 
-  it("accepts valid signatures (bare hex or sha256= prefix)", () => {
-    const sig = signInboundBody(body, secret);
-    expect(verifyInboundSignature(body, sig, secret)).toBe(true);
-    expect(verifyInboundSignature(body, sig.replace("sha256=", ""), secret)).toBe(true);
-    expect(verifyInboundSignature(new TextEncoder().encode(body), sig.toUpperCase().replace("SHA256=", "sha256="), secret)).toBe(true);
+  it("signs `${timestamp}.${tenantSlug}.${provider}.${rawBody}` as hex HMAC-SHA256", async () => {
+    const { createHmac } = await import("node:crypto");
+    const expected = createHmac("sha256", secret).update(`${ts}.acme-1a2b3c.contra.${body}`).digest("hex");
+    expect(sign()).toBe(expected);
+    expect(inboundSignedPayload(base).toString("utf8")).toBe(`${ts}.acme-1a2b3c.contra.${body}`);
   });
 
-  it("rejects tampering, wrong secrets, malformed headers and a missing secret", () => {
-    const sig = signInboundBody(body, secret);
-    expect(verifyInboundSignature(body + " ", sig, secret)).toBe(false);
-    expect(verifyInboundSignature(body, sig, "other")).toBe(false);
-    expect(verifyInboundSignature(body, "sha256=zz", secret)).toBe(false);
-    expect(verifyInboundSignature(body, null, secret)).toBe(false);
-    expect(verifyInboundSignature(body, sig, undefined)).toBe(false);
+  it("accepts a valid signature (bare hex, sha256= prefix, upper case, bytes body) and returns sha256(signature)", () => {
+    const sig = sign();
+    const ok = verifyInboundSignature({ ...base, signature: sig, secret, nowMs: now });
+    expect(ok).toEqual({ ok: true, signatureHash: inboundSignatureHash(sig) });
+    expect(verifyInboundSignature({ ...base, signature: `sha256=${sig}`, secret, nowMs: now }).ok).toBe(true);
+    expect(verifyInboundSignature({ ...base, signature: sig.toUpperCase(), secret, nowMs: now }).ok).toBe(true);
+    expect(verifyInboundSignature({ ...base, body: new TextEncoder().encode(body), signature: sig, secret, nowMs: now }).ok).toBe(true);
+    expect(inboundSignatureHash(sig)).toMatch(/^[0-9a-f]{64}$/);
+    expect(inboundSignatureHash(sig)).not.toContain(sig);
+  });
+
+  it("binds the signature to the tenant, provider, timestamp and body", () => {
+    const sig = sign();
+    const v = (over: Record<string, unknown>) => verifyInboundSignature({ ...base, signature: sig, secret, nowMs: now, ...over });
+    expect(v({ body: body + " " })).toEqual({ ok: false, reason: "mismatch" });
+    expect(v({ tenantSlug: "other-tenant" })).toEqual({ ok: false, reason: "mismatch" });
+    expect(v({ provider: "fiverr" })).toEqual({ ok: false, reason: "mismatch" });
+    expect(v({ timestamp: String(Number(ts) + 1) })).toEqual({ ok: false, reason: "mismatch" });
+    expect(v({ secret: "another-secret" })).toEqual({ ok: false, reason: "mismatch" });
+  });
+
+  it("rejects clock skew beyond ±300 s", () => {
+    const old = String(Number(ts) - 301);
+    const future = String(Number(ts) + 301);
+    expect(verifyInboundSignature({ ...base, timestamp: old, signature: sign({ timestamp: old }), secret, nowMs: now })).toEqual({ ok: false, reason: "skew" });
+    expect(verifyInboundSignature({ ...base, timestamp: future, signature: sign({ timestamp: future }), secret, nowMs: now })).toEqual({ ok: false, reason: "skew" });
+    const edge = String(Number(ts) - 300);
+    expect(verifyInboundSignature({ ...base, timestamp: edge, signature: sign({ timestamp: edge }), secret, nowMs: now }).ok).toBe(true);
+    expect(checkInboundTimestamp(ts, now)).toBeNull();
+    expect(checkInboundTimestamp(old, now)).toEqual({ ok: false, reason: "skew" });
+  });
+
+  it("rejects missing/malformed headers and a missing secret", () => {
+    const sig = sign();
+    const v = (over: Record<string, unknown>) => verifyInboundSignature({ ...base, signature: sig, secret, nowMs: now, ...over });
+    expect(v({ timestamp: null })).toEqual({ ok: false, reason: "missing" });
+    expect(v({ timestamp: "12.5" })).toEqual({ ok: false, reason: "malformed" });
+    expect(v({ timestamp: "-100" })).toEqual({ ok: false, reason: "malformed" });
+    expect(v({ timestamp: `${ts}ms` })).toEqual({ ok: false, reason: "malformed" });
+    expect(v({ signature: null })).toEqual({ ok: false, reason: "missing" });
+    expect(v({ signature: "sha256=zz" })).toEqual({ ok: false, reason: "malformed" });
+    expect(v({ secret: undefined })).toEqual({ ok: false, reason: "missing" });
+    expect(v({ secret: "" })).toEqual({ ok: false, reason: "missing" });
   });
 });
 

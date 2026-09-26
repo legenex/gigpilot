@@ -69,6 +69,13 @@ export const envSchema = z.object({
   /** Factory model id; "auto" uses Factory Router. */
   FACTORY_MODEL: z.string().default("auto"),
   FACTORY_TIMEOUT_MS: z.coerce.number().int().default(600_000),
+  /**
+   * Factory's `droid exec` runs as a child process of the worker. It is only
+   * used when this is explicitly true: a droid in the worker's container can
+   * read /proc/<worker>/environ and /run/secrets, so production must use an
+   * isolated sandbox runner instead. Default false → needs_configuration.
+   */
+  FACTORY_ALLOW_IN_PROCESS: bool.default(false),
 
   GX_BASE_URL: z.string().optional(),
   GX_API_KEY: optionalSecret,
@@ -79,6 +86,8 @@ export const envSchema = z.object({
   /** Max concurrent GigPilot requests to heavy GX models (gx-code/gx-auto): 2 slots cluster-wide, shared. */
   GX_CODE_MAX_CONCURRENCY: z.coerce.number().int().min(1).max(4).default(1),
   GX_TIMEOUT_MS: z.coerce.number().int().default(180_000),
+  /** Max wait for a GX concurrency slot before the call fails with a timeout (router falls through). */
+  GX_ACQUIRE_TIMEOUT_MS: z.coerce.number().int().min(1).default(120_000),
 
   XAI_API_KEY: optionalSecret,
   XAI_BASE_URL: z.string().default("https://api.x.ai/v1"),
@@ -111,6 +120,29 @@ export const envSchema = z.object({
    * daily budget is configured here AND in tenant settings. Default 0 = mock/test mode.
    */
   PAID_PROVIDER_DAILY_BUDGET_USD: z.coerce.number().min(0).default(0),
+
+  // --- Operator / tenant boundaries (security review H1, M6) ------------------
+  /**
+   * Comma separated exact email addresses of the server operator(s). A
+   * workspace is an *operator workspace* when any owner/admin member's email is
+   * listed. Only operator workspaces may fall back to server-wide env
+   * credentials (FACTORY_API_KEY, XAI_API_KEY, KIE_API_KEY, marketplace
+   * tokens…); every other workspace must store its own. Not a secret. List
+   * only accounts that already exist (emails are unique, first sign-up wins).
+   */
+  OPERATOR_EMAILS: z.string().optional(),
+  /**
+   * Ceiling for a NON-operator workspace's `limits.dailyPaidSpendLimitUsd`.
+   * Default 0 = tenants cannot enable real-money spend. Operator workspaces
+   * are capped by PAID_PROVIDER_DAILY_BUDGET_USD instead.
+   */
+  TENANT_MAX_DAILY_PAID_USD: z.coerce.number().min(0).default(0),
+  /**
+   * Invite mode only: allow "@domain" entries in AUTH_ALLOWED_EMAILS. Domain
+   * entries are only safe with verified email ownership, which needs an email
+   * sender (not configured in V1) — leave false and list exact addresses.
+   */
+  AUTH_REQUIRE_EMAIL_VERIFICATION: bool.default(false),
 });
 
 export type Env = z.infer<typeof envSchema>;

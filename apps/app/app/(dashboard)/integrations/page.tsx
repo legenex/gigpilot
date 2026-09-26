@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Plus } from "lucide-react";
 import { Callout, SectionHeader, formatUsd } from "@gigpilot/ui";
 import { PasteButton } from "@/components/actions/paste-button";
+import { InboundWebhookPanel } from "@/components/integrations/inbound-webhook-panel";
 import { IntegrationCard } from "@/components/integrations/integration-card";
 import { PageHeader } from "@/components/page-header";
 import { getIntegrations } from "@/lib/queries/integrations";
@@ -35,7 +36,12 @@ export default async function IntegrationsPage() {
       <Callout tone={paidEnabled ? "warn" : "info"} className="mb-7" title={paidEnabled ? "Paid providers are live" : "Paid providers are off (test mode)"}>
         {paidEnabled
           ? `Paid calls are allowed up to ${formatUsd(data.tenantBudget, { cents: true })}/day for this workspace (server cap ${formatUsd(data.envBudget, { cents: true })}/day).`
-          : `Paid providers are only called when both the server budget (PAID_PROVIDER_DAILY_BUDGET_USD, now ${formatUsd(data.envBudget)}) and your workspace daily paid limit (now ${formatUsd(data.tenantBudget)}) are above $0. Until then creative and reasoning run through mock providers at $0.`}
+          : `Paid providers are only called when both the server budget (PAID_PROVIDER_DAILY_BUDGET_USD, now ${formatUsd(data.envBudget)}) and your workspace daily paid limit (now ${formatUsd(data.tenantBudget)}, max ${formatUsd(data.paidCeilingUsd)} for this workspace) are above $0. Until then creative and reasoning run through mock providers at $0.`}
+        <span className="mt-1 block text-fg-3" data-testid="credential-scope">
+          {data.operator
+            ? "Operator workspace: server-wide provider and marketplace credentials are available as a fallback."
+            : "This workspace uses only credentials stored here (plus the shared, quota-limited local GX gateway). Server-wide keys are reserved for the operator."}
+        </span>
       </Callout>
       <div className="flex flex-col gap-9">
         {GROUPS.map((g) => {
@@ -43,9 +49,14 @@ export default async function IntegrationsPage() {
           return (
             <section key={g.kind} aria-labelledby={`g-${g.kind}`}>
               <SectionHeader id={`g-${g.kind}`} title={g.title} meta={g.meta} />
+              {g.kind === "marketplace" ? (
+                <div className="mb-4">
+                  <InboundWebhookPanel secret={data.inboundSecret} appUrl={base} slug={data.slug} canManage={ctx.role === "owner" || ctx.role === "admin"} />
+                </div>
+              ) : null}
               <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
                 {items.map((it) => (
-                  <IntegrationCard key={it.key} it={it} webhookUrl={base && data.slug ? `${base}/api/inbound/${it.key}?tenant=${data.slug}` : null} inboundSecretSet={data.inboundSecretSet} paidEnabled={paidEnabled} />
+                  <IntegrationCard key={it.key} it={it} webhookUrl={base && data.slug ? `${base}/api/inbound/${it.key}?tenant=${data.slug}` : null} inboundSecretSet={Boolean(data.inboundSecret)} paidEnabled={paidEnabled} />
                 ))}
                 {g.kind === "orchestration" ? (
                   <article className="flex flex-col justify-center gap-2 rounded-md border border-dashed border-line-strong px-5 py-5" aria-label="Future providers">

@@ -6,6 +6,7 @@ import { ProviderError } from "../lib/errors";
 import { HttpError, bodySnippet, redactText, safeFetch, type FetchLike, type LookupFn, type SafeResponse } from "../lib/http";
 import { downloadMedia } from "../lib/media";
 import { catalogCost } from "../lib/cost";
+import { abortableSleep } from "./kie";
 
 /**
  * Higgsfield Cloud API adapter.
@@ -158,8 +159,9 @@ export class HiggsfieldProvider implements CreativeProvider {
     return (setting("HIGGSFIELD_BASE_URL") || "https://api.higgsfield.ai").replace(/\/+$/, "");
   }
 
-  private sleep(ms: number): Promise<void> {
-    return this.opts.sleep ? this.opts.sleep(ms) : new Promise((r) => setTimeout(r, ms));
+  private sleep(ms: number, signal?: AbortSignal): Promise<void> {
+    if (this.opts.sleep) return this.opts.sleep(ms);
+    return abortableSleep(ms, signal);
   }
 
   private async creds(tenantId: string | null): Promise<{ key: string; secret: string } | undefined> {
@@ -193,6 +195,7 @@ export class HiggsfieldProvider implements CreativeProvider {
     const secrets = [creds.key, creds.secret];
     const endpoint = higgsfieldEndpoint(option, req);
     const body = buildHiggsfieldBody(option, req);
+    const signal = req.signal;
 
     // --- free estimate → budget gate ---
     let costUsd: number;
@@ -207,6 +210,7 @@ export class HiggsfieldProvider implements CreativeProvider {
       costSource = "catalog";
     }
     if (costUsd > req.maxCostUsd) throw new ProviderError("higgsfield", "budget_exceeded", `estimated $${costUsd.toFixed(4)} exceeds maxCostUsd $${req.maxCostUsd.toFixed(4)}`);
+    if (signal?.aborted) throw new ProviderError("higgsfield", "timeout", "aborted before submission — nothing was sent");
 
     // --- generate: exactly one attempt ---
     let res: SafeResponse;
@@ -214,10 +218,10 @@ export class HiggsfieldProvider implements CreativeProvider {
       res = await safeFetch(
         `${this.base()}/${endpoint}`,
         { method: "POST", headers: { authorization: `Key ${creds.key}:${creds.secret}`, "content-type": "application/json" }, body: JSON.stringify(body) },
-        { allowHosts: ALLOWED_HOSTS, fetch: this.opts.fetch, redact: secrets, timeoutMs: 60_000, retries: 0, idempotent: false, retryOn: () => false },
+        { allowHosts: ALLOWED_HOSTS, fetch: this.opts.fetch, redact: secrets, timeoutMs: 60_000, retries: 0, idempotent: false, retryOn: () => false, signal },
       );
     } catch (err) {
-      if (err instanceof HttpError && (err.code === "timeout" || err.code === "network")) {
+      if (err instanceof HttpError && (err.code === "timeout" || err.code === "network" || err.code === "aborted")) {
         throw new ProviderError("higgsfield", "ambiguous_submission", "generate request outcome unknown (timeout/network) — NOT retried because Higgsfield has no idempotency key; check the Higgsfield console before retrying", { retryable: false });
       }
       throw new ProviderError("higgsfield", "unavailable", err instanceof Error ? err.message : "generate failed");
@@ -239,24 +243,24 @@ export class HiggsfieldProvider implements CreativeProvider {
     const maxDelay = this.opts.pollMaxIntervalMs ?? 10_000;
     let status: StatusBody = queued;
     let transient = 0;
+    const pendingFailure = (why: string): CreativeOutput => ({
+      provider: "higgsfield",
+      model: option.model,
+      status: "failed",
+      files: [],
+      externalTaskId: requestId,
+      costUsd,
+      costSource,
+      latencyMs: Date.now() - started,
+      error: `${why} waiting for request ${requestId} (it may still complete and be billed)`,
+    });
     while (!TERMINAL.has(status.status ?? "")) {
-      if (Date.now() >= deadline) {
-        return {
-          provider: "higgsfield",
-          model: option.model,
-          status: "failed",
-          files: [],
-          externalTaskId: requestId,
-          costUsd,
-          costSource,
-          latencyMs: Date.now() - started,
-          error: `timed out after ${Math.round(timeoutMs / 1000)} s waiting for request ${requestId} (it may still complete and be billed)`,
-        };
-      }
-      await this.sleep(delay + Math.random() * 500);
+      if (Date.now() >= deadline) return pendingFailure(`timed out after ${Math.round(timeoutMs / 1000)} s`);
+      await this.sleep(delay + Math.random() * 500, signal);
+      if (signal?.aborted) return pendingFailure("aborted");
       delay = Math.min(maxDelay, delay * 1.5);
       try {
-        const s = await safeFetch(`${this.base()}/requests/${requestId}/status`, { headers: { authorization: `Key ${creds.key}:${creds.secret}` } }, { allowHosts: ALLOWED_HOSTS, fetch: this.opts.fetch, redact: secrets, timeoutMs: 20_000, retries: 2 });
+        const s = await safeFetch(`${this.base()}/requests/${requestId}/status`, { headers: { authorization: `Key ${creds.key}:${creds.secret}` } }, { allowHosts: ALLOWED_HOSTS, fetch: this.opts.fetch, redact: secrets, timeoutMs: 20_000, retries: 2, signal });
         if (!s.ok) {
           const e = mapHiggsfieldError(s, secrets, "status");
           if (e.code === "auth" || e.code === "not_found") throw e;
@@ -265,6 +269,7 @@ export class HiggsfieldProvider implements CreativeProvider {
         status = s.json<StatusBody>();
         transient = 0;
       } catch (err) {
+        if (signal?.aborted) return pendingFailure("aborted");
         if (err instanceof ProviderError) throw err;
         if (++transient >= 5) throw new ProviderError("higgsfield", "unavailable", `polling request ${requestId} failed repeatedly`, { meta: { requestId } });
       }
@@ -284,6 +289,7 @@ export class HiggsfieldProvider implements CreativeProvider {
         maxBytes: option.capability.startsWith("video.") ? 300 * 1024 * 1024 : 50 * 1024 * 1024,
         fetch: this.opts.fetch,
         lookup: this.opts.lookup,
+        signal,
       });
       return { provider: "higgsfield", model: option.model, status: "succeeded", files, externalTaskId: requestId, costUsd, costSource, latencyMs: Date.now() - started };
     } catch (err) {

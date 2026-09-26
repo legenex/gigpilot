@@ -42,6 +42,16 @@ export interface AgentDeps {
   broker?: CreativeBroker;
   storage?: StorageAdapter;
   sources?: (key: string) => SourceAdapter | undefined;
+  /**
+   * Aborted when this handler must stop: the queue job expired (pg-boss
+   * `job.signal`) or the worker is shutting down. Passed to every provider call.
+   */
+  signal?: AbortSignal;
+  /**
+   * Aborted only on worker shutdown (SIGTERM). Lets handlers tell a resumable
+   * interruption (step back to `ready`, attempt not consumed) from an expiry.
+   */
+  shutdown?: AbortSignal;
 }
 
 export const silentLogger: AgentLogger = { debug() {}, info() {}, warn() {}, error() {} };

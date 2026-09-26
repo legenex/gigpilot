@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { ArrowUpRight, Check, ChevronDown, ClipboardPaste, Copy, KeyRound, PlugZap, RefreshCw, ShieldCheck, Trash2, X } from "lucide-react";
+import { ArrowUpRight, Box, Check, ChevronDown, ClipboardPaste, Copy, KeyRound, PlugZap, RefreshCw, ShieldCheck, Trash2, X } from "lucide-react";
 import { Badge, Button, Input, StatusDot, Switch, Tooltip, cn, useToast } from "@gigpilot/ui";
 import { RelTime } from "@/components/rel-time";
 import { useShell } from "@/components/shell/app-shell";
@@ -30,7 +30,8 @@ export function IntegrationCard({ it, webhookUrl, inboundSecretSet, paidEnabled 
   const [busy, setBusy] = useState<string | null>(null);
   const [credsOpen, setCredsOpen] = useState(false);
   const [values, setValues] = useState<Record<string, string>>({});
-  const meta = INTEGRATION_STATUS_META[it.status] ?? INTEGRATION_STATUS_META.needs_configuration!;
+  const baseMeta = INTEGRATION_STATUS_META[it.status] ?? INTEGRATION_STATUS_META.needs_configuration!;
+  const meta = it.sandboxRequired ? { ...baseMeta, label: "Sandbox required", tone: "warn" as const } : baseMeta;
   const caps = it.capabilities;
   const withBusy = (_key: string) => ({ onSuccess: () => setBusy(null), onError: () => setBusy(null) });
   const storedCount = it.secretFields.filter((f) => f.hint).length;
@@ -90,7 +91,18 @@ export function IntegrationCard({ it, webhookUrl, inboundSecretSet, paidEnabled 
           ) : null}
         </div>
 
-        {it.statusDetail || it.lastError ? (
+        {it.sandboxRequired ? (
+          <div className="flex gap-2.5 rounded-sm bg-warn/[0.07] px-2.5 py-2 ring-1 ring-inset ring-warn/25" data-testid="factory-sandbox-required">
+            <Box className="mt-0.5 size-3.5 shrink-0 text-warn" strokeWidth={1.75} aria-hidden />
+            <div className="text-[11.5px] leading-[17px] text-fg-2">
+              <p className="font-medium text-fg">Requires an isolated sandbox runner</p>
+              <p className="mt-0.5 text-fg-3">
+                Factory’s <code className="font-mono">droid exec</code> would run inside the worker and could read its environment and mounted secrets, so it stays off. Reasoning routes to GX and Grok meanwhile. An operator can enable it with{" "}
+                <code className="font-mono">FACTORY_ALLOW_IN_PROCESS=true</code> only on a secret-free sandbox worker.
+              </p>
+            </div>
+          </div>
+        ) : it.statusDetail || it.lastError ? (
           <p className={cn("rounded-sm px-2.5 py-1.5 font-mono text-[11px] leading-4", it.status === "error" ? "bg-risk-wash text-risk" : "bg-surface-2 text-fg-2")}>{it.lastError ?? it.statusDetail}</p>
         ) : null}
 
@@ -121,7 +133,7 @@ export function IntegrationCard({ it, webhookUrl, inboundSecretSet, paidEnabled 
           <div className="rounded-sm bg-surface-2 px-2.5 py-2 text-[11px]">
             <p className="mb-1 flex items-center justify-between text-fg-3">
               <span>Forward notification emails to (via an email→webhook relay)</span>
-              <span className={inboundSecretSet ? "text-profit" : "text-warn"}>{inboundSecretSet ? "HMAC secret set" : "INBOUND_WEBHOOK_SECRET not set"}</span>
+              <span className={inboundSecretSet ? "text-profit" : "text-warn"}>{inboundSecretSet ? "workspace secret set" : "generate the inbound secret above"}</span>
             </p>
             <div className="flex items-center gap-2">
               <code className="min-w-0 flex-1 truncate font-mono text-fg-2">POST {webhookUrl}</code>
@@ -137,7 +149,7 @@ export function IntegrationCard({ it, webhookUrl, inboundSecretSet, paidEnabled 
                 <Copy className="size-3" />
               </button>
             </div>
-            <p className="mt-1 text-fg-3">Sign the raw body: header x-gigpilot-signature = sha256=HMAC_SHA256(body).</p>
+            <p className="mt-1 text-fg-3">Signed with this workspace’s secret — see “Inbound webhook” above for headers and a curl example.</p>
           </div>
         ) : null}
 
@@ -223,7 +235,9 @@ export function IntegrationCard({ it, webhookUrl, inboundSecretSet, paidEnabled 
                     </span>
                   </form>
                 ))}
-                <p className="text-[11px] leading-4 text-fg-3">Stored values are AES-256-GCM encrypted and never shown again — only the last 4 characters. Workspace credentials override the server env var of the same name.</p>
+                <p className="text-[11px] leading-4 text-fg-3">
+                  Stored values are AES-256-GCM encrypted and never shown again — only the last 4 characters. {it.key === "gx" ? "Without a workspace key the shared local GX gateway is used (quota-limited)." : "Workspaces use their own credentials; server-wide keys are reserved for the operator’s workspace."}
+                </p>
               </div>
             ) : null}
           </div>

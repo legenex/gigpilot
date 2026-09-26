@@ -1,3 +1,4 @@
+import { OPERATIONAL_DEFAULTS } from "@gigpilot/config";
 import {
   and,
   desc,
@@ -114,7 +115,11 @@ export async function createJobFromApplication(
       serviceFamily: analysis?.serviceFamily ?? opp.marketKey ?? "research-content",
       status: "intake",
       priceUsd,
-      spendLimitUsd: Math.min(settings.limits.perJobSpendLimitUsd, Math.max(bufferedCostUsd * 2.5, 10)),
+      // Buffer multiplier and floor are named operational constants (DECISIONS D12); the owner can raise it later (setJobSpendLimit).
+      spendLimitUsd: Math.min(
+        settings.limits.perJobSpendLimitUsd,
+        Math.max(bufferedCostUsd * OPERATIONAL_DEFAULTS.jobSpendBufferMultiplier, OPERATIONAL_DEFAULTS.minJobSpendLimitUsd),
+      ),
       estimatedCostUsd,
       acceptanceCriteria: acceptance,
       brief: analysis?.summary ?? opp.description.slice(0, 2000),

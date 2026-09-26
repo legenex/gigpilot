@@ -1,5 +1,6 @@
 import { marketInsightSchema, type QueuePayloads } from "@gigpilot/contracts";
 import { and, application, emitEvent, eq, getDb, gte, job, market, marketInsight, ne, opportunity, qaReview } from "@gigpilot/db";
+import { wrapUntrusted } from "@gigpilot/providers";
 import type { AgentDeps } from "../deps";
 import { buildMarketInsight, metricsFromStats, recommendAllocations, type MarketStats } from "../heuristics/market";
 import { familyLabel } from "../lib/util";
@@ -100,10 +101,13 @@ export async function runMarketResearch(payload: QueuePayloads["market-research"
         },
         {
           role: "user",
-          content: JSON.stringify({
-            markets: withMetrics.map((m) => ({ key: m.key, name: familyLabel(m.key), enabled: m.enabled, currentPct: m.allocationPct, recommendedPct: recommended[m.key], metrics: m.metrics })),
-            draft: deterministic,
-          }),
+          content: wrapUntrusted(
+            "tenant market data",
+            JSON.stringify({
+              markets: withMetrics.map((m) => ({ key: m.key, name: familyLabel(m.key), enabled: m.enabled, currentPct: m.allocationPct, recommendedPct: recommended[m.key], metrics: m.metrics })),
+              draft: deterministic,
+            }),
+          ),
         },
       ],
       mockResult: () => deterministic,

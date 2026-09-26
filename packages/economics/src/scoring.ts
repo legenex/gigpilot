@@ -1,9 +1,13 @@
+import { BUSINESS_DEFAULTS } from "@gigpilot/config/defaults";
 import type { EconomicsResult } from "./calculator";
 
 export interface Thresholds {
   minGrossMargin: number;
   minExpectedProfitUsd: number;
   preferredMinBudgetUsd: number;
+  /** Tenant-configurable; fall back to BUSINESS_DEFAULTS. */
+  minFitScore?: number;
+  minConfidence?: number;
 }
 
 export interface QualitySignals {
@@ -103,11 +107,13 @@ export function scoreOpportunity(econ: EconomicsResult, signals: QualitySignals,
       recommendation = "consider";
       reasons.push(`Budget below the preferred $${thresholds.preferredMinBudgetUsd.toFixed(0)} minimum`);
     }
-    if (signals.fit < 0.55) {
+    const minFit = thresholds.minFitScore ?? BUSINESS_DEFAULTS.thresholds.minFitScore;
+    const minConfidence = thresholds.minConfidence ?? BUSINESS_DEFAULTS.thresholds.minConfidence;
+    if (signals.fit < minFit) {
       recommendation = "consider";
       reasons.push(`Capability fit is moderate (${Math.round(signals.fit * 100)}%)`);
     }
-    if (signals.confidence < 0.5) {
+    if (signals.confidence < minConfidence) {
       recommendation = "consider";
       reasons.push(`Low analysis confidence (${Math.round(signals.confidence * 100)}%)`);
     }

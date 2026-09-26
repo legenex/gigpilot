@@ -12,6 +12,7 @@ import {
   market,
   marketInsight,
   providerMetric,
+  generation,
   qaReview,
   repair,
   sql,
@@ -74,20 +75,25 @@ describe("demo history seeder", () => {
     expect(markets.reduce((a, m) => a + (m.recommendedAllocationPct ?? 0), 0)).toBe(100);
     expect(await db.select().from(marketInsight).where(eq(marketInsight.tenantId, t.tenantId))).toHaveLength(1);
 
+    // Simulated history never steers routing: no creative provider metrics are seeded.
     const metricsBefore = await db.select().from(providerMetric).where(eq(providerMetric.tenantId, t.tenantId));
     expect(metricsBefore.length).toBeGreaterThan(0);
+    expect(metricsBefore.every((m) => m.capability === "inference")).toBe(true);
+    const seededGens = await db.select({ params: generation.params }).from(generation).where(eq(generation.tenantId, t.tenantId));
+    expect(seededGens.length).toBeGreaterThan(0);
+    expect(seededGens.every((g) => (g.params as Record<string, unknown>).simulated === true)).toBe(true);
 
     // Idempotent: a second call is a no-op.
     await seedDemoHistory(db, t.tenantId);
     expect((await db.select().from(job).where(eq(job.tenantId, t.tenantId))).length).toBe(jobs.length);
 
-    // Metrics rollup reproduces the seeded creative metrics (history is internally consistent).
+    // Metrics rollup excludes simulated generations (and prunes creative rows they once produced).
     const deps = testDeps();
-    await handlers["metrics-rollup"]({}, deps);
+    await db.insert(providerMetric).values({ tenantId: t.tenantId, provider: "kie", model: "veo-3-1", capability: "video.generate", attempts: 19, successes: 19, qaPasses: 8, usableRate: 0.42 });
+    const rollup = (await handlers["metrics-rollup"]({}, deps)) as { pruned: number };
+    expect(rollup.pruned).toBeGreaterThanOrEqual(1);
     const after = await db.select().from(providerMetric).where(and(eq(providerMetric.tenantId, t.tenantId), eq(providerMetric.capability, "video.generate")));
-    const before = metricsBefore.find((m) => m.capability === "video.generate")!;
-    expect(after[0]!.attempts).toBe(before.attempts);
-    expect(after[0]!.usableRate).toBeCloseTo(before.usableRate ?? 0, 3);
+    expect(after).toHaveLength(0);
 
     // The live pipeline runs on top of the history (no fresh opportunities were seeded).
     const [{ n: seededNew } = { n: 0 }] = await db.select({ n: sql<number>`count(*)::int` }).from(agentEvent).where(and(eq(agentEvent.tenantId, t.tenantId), eq(agentEvent.type, "opportunity.discovered")));

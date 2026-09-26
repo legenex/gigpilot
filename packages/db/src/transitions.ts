@@ -40,9 +40,20 @@ export class NotFoundError extends Error {
 }
 
 export class ConcurrentTransitionError extends Error {
-  constructor(machine: Machine, id: string) {
-    super(`Concurrent ${machine} transition detected for ${id}`);
+  constructor(machine: Machine, id: string, detail?: string) {
+    super(`Concurrent ${machine} transition detected for ${id}${detail ? ` (${detail})` : ""}`);
     this.name = "ConcurrentTransitionError";
+  }
+}
+
+/**
+ * The row is no longer in the state (or attempt) the caller claimed: another
+ * worker already moved it. Used to make transitions act as work claims.
+ */
+export class StaleTransitionError extends ConcurrentTransitionError {
+  constructor(machine: Machine, id: string, detail: string) {
+    super(machine, id, detail);
+    this.name = "StaleTransitionError";
   }
 }
 
@@ -57,8 +68,20 @@ export interface TransitionInput {
   patch?: Record<string, unknown>;
   /** Optional live-stream event written alongside the audit record. */
   event?: Omit<EmitEventInput, "tenantId">;
-  /** Require the current state to be one of these (defensive precondition). */
+  /** Require the current state to be one of these (defensive precondition, checked before the no-op shortcut). */
   expectFrom?: string[];
+  /**
+   * Throw StaleTransitionError when the row is already in `to` instead of the
+   * idempotent no-op. Use whenever a transition claims work (e.g. ready →
+   * running) so a racing duplicate stops.
+   */
+  requireChange?: boolean;
+  /**
+   * Extra column equality guards (TS property names), checked on read AND in
+   * the UPDATE's WHERE clause — e.g. `{ attempts: 2 }` so a stale attempt can
+   * never overwrite a newer one. A mismatch throws StaleTransitionError.
+   */
+  match?: Record<string, string | number | boolean | null>;
 }
 
 export interface TransitionResult {
@@ -74,25 +97,44 @@ export interface TransitionResult {
  */
 export async function transition(db: Executor, input: TransitionInput): Promise<TransitionResult> {
   const table = TABLES[input.machine];
+  const guards = Object.entries(input.match ?? {}).map(([key, value]) => {
+    const column = (table as unknown as Record<string, PgColumn | undefined>)[key];
+    if (!column) throw new Error(`transition(): unknown guard column ${input.machine}.${key}`);
+    return { key, column, value };
+  });
+  const selection: Record<string, PgColumn> = { status: table.status };
+  for (const g of guards) selection[`guard_${g.key}`] = g.column;
   const rows = (await db
-    .select({ status: table.status })
+    .select(selection)
     .from(table)
     .where(eq(table.id, input.id))
-    .limit(1)) as { status: string }[];
-  const current = rows[0];
+    .limit(1)) as Record<string, unknown>[];
+  const current = rows[0] as ({ status: string } & Record<string, unknown>) | undefined;
   if (!current) throw new NotFoundError(`${input.machine} ${input.id}`);
-  if (current.status === input.to) return { changed: false, from: current.status, to: input.to };
   if (input.expectFrom && !input.expectFrom.includes(current.status)) {
     throw new InvalidTransitionError(input.machine, current.status, input.to);
   }
+  for (const g of guards) {
+    if (current[`guard_${g.key}`] !== g.value) {
+      throw new StaleTransitionError(input.machine, input.id, `${g.key} is ${String(current[`guard_${g.key}`])}, expected ${String(g.value)}`);
+    }
+  }
+  if (current.status === input.to) {
+    if (input.requireChange) throw new StaleTransitionError(input.machine, input.id, `already ${input.to}`);
+    return { changed: false, from: current.status, to: input.to };
+  }
   assertTransition(input.machine, current.status, input.to);
 
+  const where = [eq(table.id, input.id), eq(table.status, current.status), ...guards.map((g) => (g.value === null ? sql`${g.column} is null` : eq(g.column, g.value)))];
   const updated = (await db
     .update(table)
     .set({ status: input.to, ...(input.patch ?? {}), ...(hasUpdatedAt(table) ? { updatedAt: new Date() } : {}) } as never)
-    .where(and(eq(table.id, input.id), eq(table.status, current.status)))
+    .where(and(...where))
     .returning({ id: table.id })) as { id: string }[];
-  if (updated.length === 0) throw new ConcurrentTransitionError(input.machine, input.id);
+  if (updated.length === 0) {
+    if (guards.length || input.requireChange) throw new StaleTransitionError(input.machine, input.id, "changed concurrently");
+    throw new ConcurrentTransitionError(input.machine, input.id);
+  }
 
   await db.insert(auditEvent).values({
     tenantId: input.tenantId,
@@ -136,6 +178,11 @@ export async function audit(
     subjectId: input.subjectId ?? null,
     data: input.data ?? null,
   });
+}
+
+/** Blocking transaction-scoped advisory lock (must run inside a transaction). */
+export async function advisoryXactLock(db: Executor, key: string): Promise<void> {
+  await db.execute(sql`select pg_advisory_xact_lock(hashtext(${key}))`);
 }
 
 /** Postgres advisory lock helper for single-flight sections keyed by string. */

@@ -15,6 +15,7 @@ export function JobActions({
   qaSummary,
   priceUsd,
   repairsLeft,
+  canRequestRevision,
 }: {
   jobId: string;
   status: string;
@@ -23,6 +24,8 @@ export function JobActions({
   qaSummary: string | null;
   priceUsd: number;
   repairsLeft: number;
+  /** From jobBlockers(): only awaiting_final_approval / delivered jobs accept owner revisions. */
+  canRequestRevision: boolean;
 }) {
   const { run, pending } = useAction();
   const [dialog, setDialog] = useState<"approve" | "revise" | "close" | "cancel" | null>(null);
@@ -30,7 +33,7 @@ export function JobActions({
   const [noteError, setNoteError] = useState<string | null>(null);
 
   const canApprove = status === "awaiting_final_approval" && deliveryStatus === "prepared";
-  const canRevise = ["executing", "qa", "awaiting_final_approval", "delivered"].includes(status);
+  const canRevise = canRequestRevision;
   const canClose = status === "delivered";
   const canCancel = !["delivered", "closed", "cancelled"].includes(status);
   const done = () => setDialog(null);

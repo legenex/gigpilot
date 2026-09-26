@@ -9,6 +9,8 @@ const KIND: Record<NeedsYouItem["kind"], { label: string; cta: string; amountLab
   proposal: { label: "Proposal", cta: "Review proposal", amountLabel: "price" },
   submit: { label: "Submit", cta: "Open applications", amountLabel: "price" },
   pursue: { label: "Pursue?", cta: "Decide", amountLabel: "exp. profit" },
+  inputs: { label: "Inputs", cta: "Confirm inputs", amountLabel: "contract" },
+  blocked: { label: "Blocked", cta: "Unblock job", amountLabel: "contract" },
 };
 
 /**

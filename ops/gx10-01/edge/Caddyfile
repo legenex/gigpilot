@@ -1,0 +1,38 @@
+# GigPilot Tailscale edge (gx10-01).
+# Listens ONLY on the host's Tailscale IPv4 and reverse-proxies to the
+# loopback-published containers. Caddy replaces any client-supplied
+# X-Forwarded-For with the real peer address (no trusted_proxies configured),
+# so the apps' per-IP rate limiting cannot be spoofed.
+{
+	admin off
+	auto_https off
+	persist_config off
+	servers {
+		timeouts {
+			read_header 15s
+			idle 2m
+		}
+	}
+}
+
+:4710 {
+	bind {$GIGPILOT_TS_IP}
+	request_body {
+		max_size 2MB
+	}
+	reverse_proxy 127.0.0.1:4710 {
+		header_up X-Real-IP {remote_host}
+	}
+}
+
+:4711 {
+	bind {$GIGPILOT_TS_IP}
+	request_body {
+		max_size 5MB
+	}
+	reverse_proxy 127.0.0.1:4711 {
+		# SSE (live activity stream) must not be buffered.
+		flush_interval -1
+		header_up X-Real-IP {remote_host}
+	}
+}

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { setTenantSecretLookup } from "../lib/credentials";
 import { parseFeed } from "../lib/rss";
 import { CLEAR_PROVIDER_ENV, jsonResponse, lookupTo, mockFetch, publicLookup, setEnv } from "../lib/testing";
 import { ContraSource } from "./contra";
@@ -126,10 +127,17 @@ describe("Contra / Fiverr / Direct", () => {
       expect("submit" in s).toBe(false);
       expect((await s.health()).status).toBe("needs_configuration");
     }
+    // The signed webhook uses each workspace's OWN secret — never the server env.
     const r = setEnv({ INBOUND_WEBHOOK_SECRET: "sec" });
-    expect((await new ContraSource().health()).status).toBe("connected");
-    expect(new FiverrSource().isConfigured()).toBe(true);
+    setTenantSecretLookup(async (t, p, n) => (t === "t1" && p === "inbound" && n === "INBOUND_WEBHOOK_SECRET" ? "tenant-sec" : undefined));
+    expect((await new ContraSource().health()).status).toBe("needs_configuration");
+    expect((await new ContraSource().withTenant("t2").health()).status).toBe("needs_configuration");
+    expect((await new ContraSource().withTenant("t1").health()).status).toBe("connected");
+    expect(await new FiverrSource().isConfiguredFor("t1")).toBe(true);
+    expect(await new FiverrSource().isConfiguredFor("t2")).toBe(false);
+    expect(new FiverrSource().isConfigured()).toBe(false);
     expect(new ContraSource().parse({ subject: "New opportunity: Brand video", text: "Budget: $800\nWe need a 30s brand video for launch." })).toMatchObject({ sourceKey: "contra", budgetMinUsd: 800 });
+    setTenantSecretLookup(null);
     r();
   });
 

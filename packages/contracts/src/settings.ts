@@ -19,6 +19,8 @@ export const tenantSettingsSchema = z.object({
       minGrossMargin: z.number().min(0).max(0.99).default(D.thresholds.minGrossMargin),
       minExpectedProfitUsd: z.number().min(0).default(D.thresholds.minExpectedProfitUsd),
       preferredMinBudgetUsd: z.number().min(0).default(D.thresholds.preferredMinBudgetUsd),
+      minFitScore: z.number().min(0).max(1).default(D.thresholds.minFitScore),
+      minConfidence: z.number().min(0).max(1).default(D.thresholds.minConfidence),
     })
     .prefault({}),
   economics: z
@@ -57,6 +59,8 @@ export const tenantSettingsSchema = z.object({
       maxStepAttempts: z.number().int().min(1).max(10).default(D.limits.maxStepAttempts),
       maxRepairsPerJob: z.number().int().min(0).max(20).default(D.limits.maxRepairsPerJob),
       maxGenerationsPerStep: z.number().int().min(1).max(50).default(D.limits.maxGenerationsPerStep),
+      dailyLocalModelCalls: z.number().int().min(0).max(100_000).default(D.limits.dailyLocalModelCalls),
+      maxRefinesPerHour: z.number().int().min(0).max(1000).default(D.limits.maxRefinesPerHour),
     })
     .prefault({}),
   routing: z

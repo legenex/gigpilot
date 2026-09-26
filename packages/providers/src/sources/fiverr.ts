@@ -8,7 +8,7 @@ import { InboundOnlySource } from "../lib/inbound-source";
  * webhook) or pastes in; the owner responds on Fiverr themselves.
  * See docs/research/marketplaces.md.
  *
- * Credentials: none (the inbound webhook is verified with the server secret
+ * Credentials: none (the inbound webhook is verified with the workspace's own
  * INBOUND_WEBHOOK_SECRET via lib/inbound.ts `verifyInboundSignature`).
  */
 export class FiverrSource extends InboundOnlySource implements SourceAdapter {
@@ -28,7 +28,10 @@ export class FiverrSource extends InboundOnlySource implements SourceAdapter {
     docsUrl: "https://www.fiverr.com/legal-portal/legal-terms/terms-of-service",
   };
 
-  withTenant(_tenantId: string | null): FiverrSource {
-    return this;
+  /** Bind a workspace: health() then reports on that workspace's own inbound webhook secret. */
+  withTenant(tenantId: string | null): FiverrSource {
+    const bound = new FiverrSource();
+    bound.boundTenantId = tenantId;
+    return bound;
   }
 }

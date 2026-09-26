@@ -1,103 +1,75 @@
-import { CommandError, addManualOpportunity } from "@gigpilot/agents";
-import { and, eq, getDb, sourceIntegration, tenant } from "@gigpilot/db";
-import { parseInboundNotification, verifyInboundSignature, type InboundProvider } from "@gigpilot/providers";
+import { CommandError, ingestInboundOpportunity } from "@gigpilot/agents";
+import { and, decryptSecret, eq, getDb, idempotencyKey, lt, providerSecret, secretAad, sourceIntegration, sql, tenant } from "@gigpilot/db";
+import { INBOUND_SECRET_NAME, INBOUND_SECRET_PROVIDER_KEY } from "@gigpilot/providers";
+import { handleInbound, type InboundDeps } from "@/lib/inbound-webhook";
 import { rateLimit } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-const PROVIDERS: InboundProvider[] = ["contra", "fiverr", "upwork", "generic"];
-const MAX_BYTES = 1_000_000;
-
-function json(body: Record<string, unknown>, status: number) {
-  return Response.json(body, { status, headers: { "Cache-Control": "no-store" } });
+/** One query for tenant + its inbound secret, so known and unknown slugs cost the same. */
+async function loadTenantSecret(slug: string): Promise<{ tenantId: string; secret: string } | null> {
+  const rows = await getDb()
+    .select({ tenantId: tenant.id, ciphertext: providerSecret.ciphertext })
+    .from(tenant)
+    .leftJoin(
+      providerSecret,
+      and(eq(providerSecret.tenantId, tenant.id), eq(providerSecret.providerKey, INBOUND_SECRET_PROVIDER_KEY), eq(providerSecret.name, INBOUND_SECRET_NAME)),
+    )
+    .where(eq(tenant.slug, slug))
+    .limit(1);
+  const r = rows[0];
+  if (!r?.ciphertext) return null;
+  try {
+    return { tenantId: r.tenantId, secret: decryptSecret(r.ciphertext, secretAad(r.tenantId, INBOUND_SECRET_PROVIDER_KEY, INBOUND_SECRET_NAME)) };
+  } catch {
+    return null;
+  }
 }
 
+const deps: InboundDeps = {
+  rateLimit,
+  loadTenantSecret,
+  async claimReplay(key, tenantId, provider) {
+    const db = getDb();
+    const claimed = await db.insert(idempotencyKey).values({ key, tenantId, scope: "inbound", result: { provider } }).onConflictDoNothing().returning({ key: idempotencyKey.key });
+    if (claimed.length) {
+      // Signatures older than the ±300 s window can never verify again: prune them (best effort).
+      void db
+        .delete(idempotencyKey)
+        .where(and(eq(idempotencyKey.scope, "inbound"), eq(idempotencyKey.tenantId, tenantId), lt(idempotencyKey.createdAt, sql`now() - interval '15 minutes'`)))
+        .catch(() => undefined);
+    }
+    return claimed.length > 0;
+  },
+  async releaseReplay(key) {
+    await getDb()
+      .delete(idempotencyKey)
+      .where(eq(idempotencyKey.key, key))
+      .catch(() => undefined);
+  },
+  async sourceEnabled(tenantId, sourceKey) {
+    const [src] = await getDb()
+      .select({ enabled: sourceIntegration.enabled })
+      .from(sourceIntegration)
+      .where(and(eq(sourceIntegration.tenantId, tenantId), eq(sourceIntegration.sourceKey, sourceKey)))
+      .limit(1);
+    return src ? src.enabled : null;
+  },
+  ingest: (tenantId, raw, provider, meta) => ingestInboundOpportunity(tenantId, raw, provider, meta),
+  classifyError(err) {
+    if (err instanceof CommandError) return { kind: err.code === "conflict" ? "conflict" : "invalid", message: err.message };
+    return { kind: "other" };
+  },
+  log: (entry) => console.error(JSON.stringify(entry)),
+};
+
 /**
- * Forwarded marketplace notifications (owner's own emails via an
- * email→webhook relay). Verified with HMAC-SHA256 over the raw body
- * (x-gigpilot-signature, INBOUND_WEBHOOK_SECRET), tenant from ?tenant=<slug>.
- * The parsed opportunity goes through the same path as manual intake.
+ * Forwarded marketplace notifications (the owner's own emails via an
+ * email→webhook relay), signed per workspace. See lib/inbound-webhook.ts for
+ * the scheme; the Integrations page documents it with a curl example.
  */
 export async function POST(request: Request, { params }: { params: Promise<{ provider: string }> }) {
-  const { provider: p } = await params;
-  const provider = p as InboundProvider;
-  if (!PROVIDERS.includes(provider)) return json({ error: "unknown provider" }, 404);
-
-  const url = new URL(request.url);
-  const slug = (url.searchParams.get("tenant") ?? "").trim().slice(0, 80);
-  const ip = (request.headers.get("x-forwarded-for") ?? "").split(",")[0]?.trim() || "unknown";
-  if (!rateLimit(`inbound:${ip}:${slug}`, 30, 60_000).ok) return json({ error: "rate limited" }, 429);
-
-  const secret = process.env.INBOUND_WEBHOOK_SECRET?.trim();
-  if (!secret) return json({ error: "inbound webhook not configured" }, 503);
-
-  const declared = Number(request.headers.get("content-length") ?? 0);
-  if (declared > MAX_BYTES) return json({ error: "payload too large" }, 413);
-  const raw = await request.text();
-  if (raw.length > MAX_BYTES) return json({ error: "payload too large" }, 413);
-  if (!verifyInboundSignature(raw, request.headers.get("x-gigpilot-signature"), secret)) return json({ error: "invalid signature" }, 401);
-
-  if (!slug) return json({ error: "missing tenant" }, 400);
-  const [t] = await getDb().select({ id: tenant.id }).from(tenant).where(eq(tenant.slug, slug)).limit(1);
-  if (!t) return json({ error: "unknown tenant" }, 404);
-
-  let payload: { subject?: string; text?: string; html?: string; from?: string; receivedAt?: string } = {};
-  const type = request.headers.get("content-type") ?? "";
-  if (type.includes("application/json")) {
-    try {
-      payload = JSON.parse(raw) as typeof payload;
-    } catch {
-      return json({ error: "invalid JSON" }, 400);
-    }
-  } else {
-    payload = { text: raw };
-  }
-
-  const sourceKey = provider === "generic" ? "direct" : provider;
-  const [src] = await getDb()
-    .select({ enabled: sourceIntegration.enabled })
-    .from(sourceIntegration)
-    .where(and(eq(sourceIntegration.tenantId, t.id), eq(sourceIntegration.sourceKey, sourceKey)))
-    .limit(1);
-  if (src && !src.enabled) return json({ ignored: true, reason: "source disabled in Integrations" }, 202);
-
-  const parsed = parseInboundNotification({
-    provider,
-    subject: typeof payload.subject === "string" ? payload.subject : undefined,
-    text: typeof payload.text === "string" ? payload.text : undefined,
-    html: typeof payload.html === "string" ? payload.html : undefined,
-    from: typeof payload.from === "string" ? payload.from : undefined,
-    receivedAt: typeof payload.receivedAt === "string" ? payload.receivedAt : undefined,
-  });
-  if (!parsed) return json({ ignored: true, reason: "not an opportunity" }, 202);
-
-  try {
-    // System actor for inbound intake (no user session). See report: a
-    // dedicated ingestInboundOpportunity command would keep the email metadata.
-    const res = await addManualOpportunity(
-      { tenantId: t.id, userId: `inbound:${provider}`, role: "owner" },
-      {
-        sourceKey: sourceKey as "contra" | "fiverr" | "upwork" | "direct",
-        title: parsed.title.length >= 4 ? parsed.title : `${parsed.title} (forwarded)`,
-        description: parsed.description.length >= 20 ? parsed.description : `${parsed.description}\n\n(Forwarded ${provider} notification)`,
-        url: parsed.url,
-        clientName: parsed.clientName,
-        budgetType: parsed.budgetType,
-        budgetMinUsd: parsed.budgetMinUsd,
-        budgetMaxUsd: parsed.budgetMaxUsd,
-        deadlineAt: parsed.deadlineAt ? new Date(parsed.deadlineAt) : undefined,
-      },
-    );
-    await getDb()
-      .update(sourceIntegration)
-      .set({ lastSyncAt: new Date() })
-      .where(and(eq(sourceIntegration.tenantId, t.id), eq(sourceIntegration.sourceKey, sourceKey)));
-    return json({ ok: true, opportunityId: res.opportunityId }, 201);
-  } catch (err) {
-    if (err instanceof CommandError && err.code === "conflict") return json({ ok: true, duplicate: true }, 200);
-    if (err instanceof CommandError) return json({ error: err.message }, 422);
-    console.error(JSON.stringify({ level: "error", msg: "inbound intake failed", provider, error: err instanceof Error ? err.message : String(err) }));
-    return json({ error: "intake failed" }, 500);
-  }
+  const { provider } = await params;
+  return handleInbound(request, provider, deps);
 }

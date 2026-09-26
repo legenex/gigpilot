@@ -1,3 +1,4 @@
+import { OPERATIONAL_DEFAULTS } from "@gigpilot/config";
 import type {
   IntelligenceFamily,
   IntelligenceProvider,
@@ -9,6 +10,7 @@ import { FactoryProvider } from "./intelligence/factory";
 import { GrokProvider } from "./intelligence/grok";
 import { GxProvider } from "./intelligence/gx";
 import { MockIntelligenceProvider } from "./intelligence/mock";
+import { ProviderError } from "./lib/errors";
 import type { FallbackRecord, IntelligenceRouter, ProviderCallContext, RoutedIntelligenceResult } from "./types";
 
 /**
@@ -70,14 +72,113 @@ export async function isConfiguredForTenant(p: { isConfigured(): boolean }, tena
   return p.isConfigured();
 }
 
+/** Codes that say nothing about provider availability (bad input, policy, output quality). */
+const NON_AVAILABILITY_CODES = new Set(["validation", "structured_output", "budget_exceeded", "not_configured", "unsupported", "compliance", "auth", "forbidden", "insufficient_credits", "not_found"]);
+
+/** Whether a failure indicates the provider family is browning out (timeouts, 5xx, network). */
+export function isAvailabilityFailure(err: unknown): boolean {
+  if (err instanceof ProviderError) return !NON_AVAILABILITY_CODES.has(err.code);
+  if (err instanceof Error && /validation|malformed JSON/i.test(err.message)) return false;
+  return true;
+}
+
+export interface CircuitBreakerOptions {
+  /** Consecutive availability failures that open the circuit. */
+  failureThreshold?: number;
+  /** How long an open circuit skips the family before one half-open probe. */
+  cooldownMs?: number;
+  now?: () => number;
+}
+
+interface CircuitState {
+  failures: number;
+  openedAt: number | null;
+  probeInFlight: boolean;
+}
+
+/**
+ * Per-family circuit breaker. closed → (N consecutive availability failures)
+ * → open (skip for cooldown) → half-open (exactly one probe call) → closed on
+ * success / open again on failure. Stops a GX brown-out from making every
+ * call wait for its full timeout before falling through.
+ */
+export class CircuitBreaker {
+  private readonly states = new Map<string, CircuitState>();
+  private readonly threshold: number;
+  private readonly cooldownMs: number;
+  private readonly now: () => number;
+
+  constructor(opts: CircuitBreakerOptions = {}) {
+    this.threshold = Math.max(1, opts.failureThreshold ?? OPERATIONAL_DEFAULTS.circuitBreakerFailures);
+    this.cooldownMs = Math.max(0, opts.cooldownMs ?? OPERATIONAL_DEFAULTS.circuitBreakerCooldownSeconds * 1000);
+    this.now = opts.now ?? Date.now;
+  }
+
+  private state(family: string): CircuitState {
+    let s = this.states.get(family);
+    if (!s) {
+      s = { failures: 0, openedAt: null, probeInFlight: false };
+      this.states.set(family, s);
+    }
+    return s;
+  }
+
+  /** null when a call may proceed (claims the half-open probe slot), else the skip reason. */
+  admit(family: string): string | null {
+    const s = this.state(family);
+    if (s.openedAt === null) return null;
+    const waited = this.now() - s.openedAt;
+    if (waited < this.cooldownMs) {
+      return `circuit open after ${s.failures} consecutive failures (retry in ${Math.ceil((this.cooldownMs - waited) / 1000)}s)`;
+    }
+    if (s.probeInFlight) return "circuit half-open (probe in flight)";
+    s.probeInFlight = true;
+    return null;
+  }
+
+  success(family: string): void {
+    const s = this.state(family);
+    s.failures = 0;
+    s.openedAt = null;
+    s.probeInFlight = false;
+  }
+
+  failure(family: string): void {
+    const s = this.state(family);
+    s.failures++;
+    if (s.probeInFlight || s.failures >= this.threshold) s.openedAt = this.now();
+    s.probeInFlight = false;
+  }
+
+  /** A call that neither proved nor disproved availability (e.g. caller abort). */
+  neutral(family: string): void {
+    this.state(family).probeInFlight = false;
+  }
+
+  status(family: string): "closed" | "open" | "half-open" {
+    const s = this.states.get(family);
+    if (!s || s.openedAt === null) return "closed";
+    return this.now() - s.openedAt < this.cooldownMs ? "open" : "half-open";
+  }
+
+  reset(): void {
+    this.states.clear();
+  }
+}
+
 function formatUsd(n: number): string {
   return `$${n < 0.01 ? n.toFixed(4) : n.toFixed(2)}`;
 }
 
 export class ModelRouter implements IntelligenceRouter {
   private readonly byFamily: Map<IntelligenceFamily, IntelligenceProvider>;
+  readonly breaker: CircuitBreaker;
 
-  constructor(private readonly list: IntelligenceProvider[]) {
+  constructor(
+    private readonly list: IntelligenceProvider[],
+    opts: { breaker?: CircuitBreaker | CircuitBreakerOptions } = {},
+  ) {
+    this.breaker = opts.breaker instanceof CircuitBreaker ? opts.breaker : new CircuitBreaker(opts.breaker);
     this.byFamily = new Map(list.map((p) => [p.family, p]));
     if (!this.byFamily.has("mock")) {
       const mock = new MockIntelligenceProvider();
@@ -124,6 +225,7 @@ export class ModelRouter implements IntelligenceRouter {
     const request: IntelligenceRequest<T> = { ...req, context: { ...req.context, tenantId: req.context?.tenantId ?? ctx.tenantId ?? undefined } };
 
     for (const family of order) {
+      if (req.signal?.aborted) throw new RoutingError(`${req.task} aborted`, [...fallbacks, { family, reason: "aborted by caller" }]);
       const provider = this.byFamily.get(family);
       if (!provider) {
         fallbacks.push({ family, reason: "provider not registered" });
@@ -134,8 +236,32 @@ export class ModelRouter implements IntelligenceRouter {
         fallbacks.push({ family, reason: skip });
         continue;
       }
+      const circuit = family === "mock" ? null : this.breaker.admit(family);
+      if (circuit) {
+        fallbacks.push({ family, reason: circuit });
+        continue;
+      }
+      let res: IntelligenceResult<T>;
       try {
-        const res = await provider.complete(request);
+        res = await provider.complete(request);
+      } catch (err) {
+        if (family !== "mock") {
+          if (req.signal?.aborted) this.breaker.neutral(family);
+          else if (isAvailabilityFailure(err)) this.breaker.failure(family);
+          else this.breaker.success(family); // it answered — the request itself was the problem
+        }
+        if (req.signal?.aborted) throw new RoutingError(`${req.task} aborted`, [...fallbacks, { family, reason: `aborted: ${errorReason(err)}` }]);
+        if (family === "mock") {
+          throw new RoutingError(`All intelligence providers failed for ${req.task}: ${errorReason(err)}`, [
+            ...fallbacks,
+            { family, reason: `failed: ${errorReason(err)}` },
+          ]);
+        }
+        fallbacks.push({ family, reason: `failed: ${errorReason(err)}` });
+        continue;
+      }
+      if (family !== "mock") this.breaker.success(family);
+      try {
         const data = this.validate(request, res);
         return { ...res, data, fallbacks, paid: provider.paid };
       } catch (err) {
@@ -176,8 +302,8 @@ export class ModelRouter implements IntelligenceRouter {
 
 let singleton: ModelRouter | undefined;
 
-export function createIntelligenceRouter(providers?: IntelligenceProvider[]): ModelRouter {
-  return new ModelRouter(providers ?? [new GxProvider(), new FactoryProvider(), new GrokProvider(), new MockIntelligenceProvider()]);
+export function createIntelligenceRouter(providers?: IntelligenceProvider[], opts: { breaker?: CircuitBreaker | CircuitBreakerOptions } = {}): ModelRouter {
+  return new ModelRouter(providers ?? [new GxProvider(), new FactoryProvider(), new GrokProvider(), new MockIntelligenceProvider()], opts);
 }
 
 export function getIntelligenceRouter(): IntelligenceRouter {

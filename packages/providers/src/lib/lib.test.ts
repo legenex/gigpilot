@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { opportunityAnalysisSchema } from "@gigpilot/contracts";
-import { clearCredentialCache, resolveCredential, setTenantSecretLookup } from "./credentials";
+import { SHAREABLE_ENV_CREDENTIALS, clearCredentialCache, resolveCredential, resolveTenantOnlyCredential, setOperatorTenantCheck, setTenantSecretLookup } from "./credentials";
 import { Semaphore } from "./limiter";
 import { imageDimensions, sniffMime } from "./media";
 import { extractJsonText, jsonSchemaFor, mergeSystemMessages, parseAndValidate, repairMessages } from "./structured";
@@ -65,33 +65,112 @@ describe("Semaphore", () => {
   });
 });
 
-describe("credentials", () => {
-  afterEach(() => setTenantSecretLookup(null));
+describe("credentials — env fallback policy (H1)", () => {
+  afterEach(() => {
+    setTenantSecretLookup(null);
+    setOperatorTenantCheck(null);
+  });
 
-  it("prefers tenant secrets, falls back to env, caches ≤ 60 s", async () => {
-    const restore = setEnv({ GX_API_KEY: "env-key" });
+  const PAID_AND_MARKETPLACE: [string, string][] = [
+    ["factory", "FACTORY_API_KEY"],
+    ["grok", "XAI_API_KEY"],
+    ["kie", "KIE_API_KEY"],
+    ["higgsfield", "HIGGSFIELD_API_KEY"],
+    ["higgsfield", "HIGGSFIELD_API_SECRET"],
+    ["freelancer", "FREELANCER_OAUTH_TOKEN"],
+    ["upwork", "UPWORK_ACCESS_TOKEN"],
+    ["upwork", "UPWORK_CLIENT_ID"],
+  ];
+  const envAll = () => setEnv(Object.fromEntries([...PAID_AND_MARKETPLACE.map(([, n]) => [n, `env-${n}`]), ["GX_API_KEY", "env-gx"]]));
+
+  it("only the local GX gateway key is shareable", () => {
+    expect([...SHAREABLE_ENV_CREDENTIALS]).toEqual(["GX_API_KEY"]);
+  });
+
+  it("prefers the tenant's own secret and caches ≤ 60 s", async () => {
+    const restore = envAll();
     let calls = 0;
     setTenantSecretLookup(async (tenantId) => {
       calls++;
-      return tenantId === "t1" ? "tenant-key" : process.env.GX_API_KEY;
+      return tenantId === "t1" ? "tenant-key" : undefined;
     });
-    expect(await resolveCredential("gx", "GX_API_KEY", "t1")).toBe("tenant-key");
-    expect(await resolveCredential("gx", "GX_API_KEY", "t1")).toBe("tenant-key");
+    setOperatorTenantCheck(async () => false);
+    expect(await resolveCredential("kie", "KIE_API_KEY", "t1")).toBe("tenant-key");
+    expect(await resolveCredential("kie", "KIE_API_KEY", "t1")).toBe("tenant-key");
     expect(calls).toBe(1);
-    expect(await resolveCredential("gx", "GX_API_KEY", "t2")).toBe("env-key");
-    expect(await resolveCredential("gx", "GX_API_KEY", null)).toBe("env-key");
     clearCredentialCache("t1");
-    await resolveCredential("gx", "GX_API_KEY", "t1");
-    expect(calls).toBe(3);
+    await resolveCredential("kie", "KIE_API_KEY", "t1");
+    expect(calls).toBe(2);
     restore();
   });
 
-  it("falls back to env when the tenant store fails", async () => {
-    const restore = setEnv({ KIE_API_KEY: "env-kie" });
+  it("never falls back to server env for marketplace or paid providers in a non-operator workspace", async () => {
+    const restore = envAll();
+    setTenantSecretLookup(async () => undefined);
+    setOperatorTenantCheck(async () => false);
+    for (const [provider, name] of PAID_AND_MARKETPLACE) {
+      expect(await resolveCredential(provider, name, "tenant-x"), name).toBeUndefined();
+    }
+    restore();
+  });
+
+  it("shares the GX gateway key with every workspace", async () => {
+    const restore = envAll();
+    setTenantSecretLookup(async () => undefined);
+    setOperatorTenantCheck(async () => false);
+    expect(await resolveCredential("gx", "GX_API_KEY", "tenant-x")).toBe("env-gx");
+    restore();
+  });
+
+  it("operator workspaces fall back to every server env credential", async () => {
+    const restore = envAll();
+    setTenantSecretLookup(async () => undefined);
+    const checked: string[] = [];
+    setOperatorTenantCheck(async (t) => {
+      checked.push(t);
+      return t === "op";
+    });
+    for (const [provider, name] of PAID_AND_MARKETPLACE) {
+      expect(await resolveCredential(provider, name, "op"), name).toBe(`env-${name}`);
+      expect(await resolveCredential(provider, name, "not-op"), name).toBeUndefined();
+    }
+    expect(checked).toContain("op");
+    restore();
+  });
+
+  it("system context (no tenant) reads server env", async () => {
+    const restore = envAll();
+    setTenantSecretLookup(async () => {
+      throw new Error("must not be called");
+    });
+    expect(await resolveCredential("kie", "KIE_API_KEY", null)).toBe("env-KIE_API_KEY");
+    expect(await resolveCredential("kie", "KIE_API_KEY", undefined)).toBe("env-KIE_API_KEY");
+    restore();
+  });
+
+  it("fails closed when the tenant store or the operator check fails (GX still shared)", async () => {
+    const restore = envAll();
     setTenantSecretLookup(async () => {
       throw new Error("db down: connection string postgres://user:pw@host");
     });
-    expect(await resolveCredential("kie", "KIE_API_KEY", "t9")).toBe("env-kie");
+    setOperatorTenantCheck(async () => true);
+    expect(await resolveCredential("kie", "KIE_API_KEY", "t9")).toBeUndefined();
+    expect(await resolveCredential("gx", "GX_API_KEY", "t9")).toBe("env-gx");
+    setTenantSecretLookup(async () => undefined);
+    setOperatorTenantCheck(async () => {
+      throw new Error("db down");
+    });
+    expect(await resolveCredential("factory", "FACTORY_API_KEY", "t9")).toBeUndefined();
+    restore();
+  });
+
+  it("resolveTenantOnlyCredential never returns the env value", async () => {
+    const restore = setEnv({ INBOUND_WEBHOOK_SECRET: "env-inbound" });
+    setTenantSecretLookup(async (t, p, n) => (t === "t1" && p === "inbound" && n === "INBOUND_WEBHOOK_SECRET" ? "tenant-inbound" : undefined));
+    setOperatorTenantCheck(async () => true);
+    expect(await resolveTenantOnlyCredential("inbound", "INBOUND_WEBHOOK_SECRET", "t1")).toBe("tenant-inbound");
+    expect(await resolveTenantOnlyCredential("inbound", "INBOUND_WEBHOOK_SECRET", "t2")).toBeUndefined();
+    expect(await resolveTenantOnlyCredential("inbound", "INBOUND_WEBHOOK_SECRET", null)).toBeUndefined();
     restore();
   });
 });

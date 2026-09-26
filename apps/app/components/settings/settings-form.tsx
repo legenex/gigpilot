@@ -126,7 +126,20 @@ function Group({ id, title, description, children }: { id: string; title: string
   );
 }
 
-export function SettingsForm({ initial, envBudgetUsd, feeKeys }: { initial: TenantSettings; envBudgetUsd: number; feeKeys: string[] }) {
+export function SettingsForm({
+  initial,
+  envBudgetUsd,
+  paidCeilingUsd,
+  operator,
+  feeKeys,
+}: {
+  initial: TenantSettings;
+  envBudgetUsd: number;
+  /** Highest daily paid limit this workspace may set (operator-controlled). */
+  paidCeilingUsd: number;
+  operator: boolean;
+  feeKeys: string[];
+}) {
   const [s, setS] = useState<TenantSettings>(() => clone(initial));
   const [base, setBase] = useState<TenantSettings>(() => clone(initial));
   const [serverErrors, setServerErrors] = useState<Errors>({});
@@ -143,8 +156,11 @@ export function SettingsForm({ initial, envBudgetUsd, feeKeys }: { initial: Tena
       if (g[k].min > g[k].max) e[`goals.${k}.max`] = "Max must be at least the min.";
     }
     if (s.routing.allowedModelFamilies.length === 0) e["routing.allowedModelFamilies"] = "Allow at least one model family (GX is free and local).";
+    if (s.limits.dailyPaidSpendLimitUsd !== base.limits.dailyPaidSpendLimitUsd && s.limits.dailyPaidSpendLimitUsd > paidCeilingUsd) {
+      e["limits.dailyPaidSpendLimitUsd"] = `Must be at most ${formatUsd(paidCeilingUsd, { cents: true })} (operator ceiling).`;
+    }
     return { ...e, ...serverErrors };
-  }, [s, serverErrors]);
+  }, [s, base, serverErrors, paidCeilingUsd]);
   const errorCount = Object.keys(errors).length;
 
   const set = (path: string, value: unknown) => {
@@ -379,7 +395,12 @@ export function SettingsForm({ initial, envBudgetUsd, feeKeys }: { initial: Tena
         </Group>
 
         <Group id="limits" title="Limits & spend" description="Hard guardrails enforced by the orchestrator before every paid call.">
-          <Row id="limits.dailyPaidSpendLimitUsd" label="Daily paid spend limit" hint="Workspace cap for real-money provider calls per day." error={e("limits.dailyPaidSpendLimitUsd")}>
+          <Row
+            id="limits.dailyPaidSpendLimitUsd"
+            label="Daily paid spend limit"
+            hint={`Workspace cap for real-money provider calls per day. Max ${formatUsd(paidCeilingUsd, { cents: true })} — ${operator ? "the server budget" : "set by the GigPilot operator (TENANT_MAX_DAILY_PAID_USD)"}.`}
+            error={e("limits.dailyPaidSpendLimitUsd")}
+          >
             {usd("limits.dailyPaidSpendLimitUsd", s.limits.dailyPaidSpendLimitUsd)}
           </Row>
           <Callout tone={paidOn ? "warn" : "info"} icon={<CircleAlert />} title={paidOn ? "Paid providers can be called" : "Paid providers stay off"} className="mb-2 mt-1">

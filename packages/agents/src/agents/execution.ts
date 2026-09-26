@@ -1,13 +1,29 @@
+import path from "node:path";
 import { strToU8, zipSync } from "fflate";
 import { z } from "zod";
-import { AGENTS, QUEUES, type AgentKey, type Capability, type CreativeRequest, type IntelligenceTask, type QueuePayloads } from "@gigpilot/contracts";
-import { and, asset, client, desc, eq, getDb, inArray, job, opportunityAnalysis, transition, workflowStep } from "@gigpilot/db";
+import { AGENTS, InvalidTransitionError, QUEUES, type AgentKey, type Capability, type CreativeRequest, type IntelligenceTask, type QueuePayloads } from "@gigpilot/contracts";
+import { and, asset, client, ConcurrentTransitionError, desc, emitEvent, eq, getDb, inArray, job, opportunityAnalysis, transition, workflowStep, type TransitionInput } from "@gigpilot/db";
+import { isProviderError, neutraliseDelimiters, wrapUntrusted } from "@gigpilot/providers";
 import { storageOf, type AgentDeps } from "../deps";
 import { codeArtifactSchema, generateAutomationArtifact, generateWebArtifact, type CodeArtifact } from "../heuristics/code";
 import { buildConcepts, buildSrt, generateDocument, langCode, productPhrase, type Concept, type ContentContext } from "../heuristics/content";
 import { isQaStep } from "../heuristics/workflows";
+import { notify } from "../lib/notify";
+export { OWNER_BLOCK_REASONS, blockedReasonOf, isOwnerBlocked, type OwnerBlockReason } from "../lib/steps";
 import { money, quote, safeError, slugify, truncate } from "../lib/util";
-import { BudgetBlockedError, callCreative, callIntelligence, runAgent, storeFile, type AssetRow, type JobRow, type RunContext, type StepRow } from "../runtime";
+import {
+  abortReasonOf,
+  BudgetBlockedError,
+  callCreative,
+  callIntelligence,
+  runAgent,
+  StepAbortedError,
+  storeFile,
+  type AssetRow,
+  type JobRow,
+  type RunContext,
+  type StepRow,
+} from "../runtime";
 import { loadActiveSteps } from "./orchestrator";
 import { runQaStep } from "./qa";
 import { recoverFromQaFailure } from "./recovery";
@@ -140,13 +156,11 @@ function docMessages(c: ContentContext, fallback: string) {
     {
       role: "user" as const,
       content: [
-        `Job: ${c.title}`,
-        `Brief: ${truncate(c.brief, 1500)}`,
-        `Acceptance criteria: ${c.acceptance.join("; ")}`,
-        c.repairHint ? `QA feedback to fix: ${c.repairHint}` : "",
-        c.revisionNote ? `Owner revision request: ${c.revisionNote}` : "",
-        Object.keys(c.prior).length ? `Upstream notes:\n${Object.entries(c.prior).map(([k, v]) => `### ${k}\n${truncate(v, 1200)}`).join("\n")}` : "",
-        `Required structure example:\n${truncate(fallback, 1200)}`,
+        wrapUntrusted("client brief", [`Job: ${c.title}`, `Brief: ${truncate(c.brief, 1500)}`, `Acceptance criteria: ${c.acceptance.join("; ")}`].join("\n")),
+        c.repairHint ? `QA feedback to fix: ${neutraliseDelimiters(c.repairHint)}` : "",
+        c.revisionNote ? `Owner revision request: ${neutraliseDelimiters(c.revisionNote)}` : "",
+        Object.keys(c.prior).length ? `Upstream notes (earlier outputs):\n${wrapUntrusted("upstream outputs", Object.entries(c.prior).map(([k, v]) => `### ${k}\n${truncate(v, 1200)}`).join("\n"))}` : "",
+        `Required structure example:\n${wrapUntrusted("structure example", truncate(fallback, 1200))}`,
       ]
         .filter(Boolean)
         .join("\n\n"),
@@ -233,9 +247,13 @@ async function executeGenerate(ctx: RunContext, j: JobRow, step: StepRow, all: S
   const toRender = repair?.unitIndexes?.length ? repair.unitIndexes : Array.from({ length: units }, (_, i) => i);
   const defect = activeDefect(step, attempt);
   const items = new Map<number, GenItem>(repair ? previous.map((p) => [p.unitIndex, p]) : []);
+  // Unit keys are scoped to the repair/revision that asked for them, never to the attempt:
+  // units that already succeeded are reused on a retry instead of regenerated (and re-paid).
+  const scope = repair?.repairId ?? (typeof input.revisionRepairId === "string" ? `rev-${input.revisionRepairId}` : "base");
   let spent = 0;
   let mode = "live";
   for (const i of toRender) {
+    await ctx.checkpoint();
     const c = concepts[i % concepts.length]!;
     const prompt = [
       `Headline: ${c.headline}`,
@@ -260,14 +278,14 @@ async function executeGenerate(ctx: RunContext, j: JobRow, step: StepRow, all: S
       aspectRatio,
       durationSec: capability.startsWith("video.") ? durationSec : undefined,
       params: { unitIndex: i, variant: i, concept: c.angle },
-      idempotencyKey: `gen:${step.id}:${attempt}:${i}`,
+      idempotencyKey: `gen:${step.id}:${scope}:${i}`,
       label: `${step.name.replace(/ — batch [AB]$/, "")} #${i + 1}${useEdit ? " (edit)" : ""}`,
       simulateDefect: defect && i === toRender[0] ? defect : null,
       exclude: repair?.exclude,
       repairOfId: repair ? (prev?.generationId ?? null) : null,
     });
-    spent += res.costUsd;
-    mode = res.decision?.mode ?? mode;
+    if (!res.reused) spent += res.costUsd;
+    mode = res.mode;
     items.set(i, {
       unitIndex: i,
       generationId: res.generationId,
@@ -276,7 +294,7 @@ async function executeGenerate(ctx: RunContext, j: JobRow, step: StepRow, all: S
       provider: res.provider,
       model: res.model,
       concept: c.angle,
-      mode: res.decision?.mode ?? "reused",
+      mode: res.mode,
     });
   }
   const sorted = [...items.values()].sort((a, b) => a.unitIndex - b.unitIndex);
@@ -294,14 +312,35 @@ async function executeGenerate(ctx: RunContext, j: JobRow, step: StepRow, all: S
   };
 }
 
-function zipArtifact(art: CodeArtifact): Uint8Array {
+/**
+ * Archive entry path for a model-supplied file path, or null when unsafe
+ * (absolute, drive-letter, `..` traversal, NUL, empty). Normalised with
+ * path.posix so `a/./b` and `a//b` collapse; never rewritten into something
+ * else — unsafe entries are rejected, not "cleaned".
+ */
+export function safeArchivePath(raw: string): string | null {
+  if (typeof raw !== "string" || !raw || raw.includes("\0")) return null;
+  const p = raw.replace(/\\/g, "/");
+  if (p.startsWith("/") || /^[A-Za-z]:/.test(p) || p.startsWith("~")) return null;
+  if (p.split("/").some((seg) => seg === "..")) return null;
+  const norm = path.posix.normalize(p).replace(/^(\.\/)+/, "");
+  if (!norm || norm === "." || norm === ".." || norm.startsWith("../") || path.posix.isAbsolute(norm) || norm.endsWith("/")) return null;
+  return norm;
+}
+
+export function zipArtifact(art: CodeArtifact): { bytes: Uint8Array; rejected: string[] } {
   const files: Record<string, Uint8Array> = {};
+  const rejected: string[] = [];
   for (const f of art.files) {
-    const safe = f.path.replace(/\\/g, "/").replace(/^\/+/, "").replace(/\.\.(\/|$)/g, "");
-    if (safe) files[`project/${safe}`] = strToU8(f.content);
+    const safe = safeArchivePath(f.path);
+    if (!safe || safe === "test-report.json") {
+      rejected.push(String(f.path).slice(0, 200));
+      continue;
+    }
+    files[`project/${safe}`] = strToU8(f.content);
   }
   files["project/test-report.json"] = strToU8(JSON.stringify(art.testReport, null, 2));
-  return zipSync(files, { level: 6 });
+  return { bytes: zipSync(files, { level: 6 }), rejected };
 }
 
 async function executeCode(ctx: RunContext, j: JobRow, step: StepRow, _all: StepRow[], attempt: number): Promise<StepOutcome> {
@@ -324,11 +363,18 @@ async function executeCode(ctx: RunContext, j: JobRow, step: StepRow, _all: Step
           role: "system",
           content:
             "You are GigPilot's coding worker. Return JSON {summary, files:[{path, content}], testReport:{runner, simulated, passed, failed, tests:[{name,status,durationMs,error?}]}}. " +
-            "Include README.md, source files and tests. Secrets only via environment variables. Report tests honestly; set simulated=true if you did not execute them.",
+            "Include README.md, source files and tests. Secrets only via environment variables. Report tests honestly; set simulated=true if you did not execute them. " +
+            "File paths must be relative (no leading '/', no '..').",
         },
         {
           role: "user",
-          content: `Job: ${j.title}\nBrief: ${truncate(j.brief, 2000)}\nAcceptance: ${[...step.acceptance, ...j.acceptanceCriteria].join("; ")}${repair ? `\nFix from QA: ${repair.hint}` : ""}\nReference structure: ${deterministic.files.map((f) => f.path).join(", ")}`,
+          content: [
+            wrapUntrusted("client brief", `Job: ${j.title}\nBrief: ${truncate(j.brief, 2000)}\nAcceptance: ${[...step.acceptance, ...j.acceptanceCriteria].join("; ")}`),
+            repair ? `Fix from QA: ${neutraliseDelimiters(repair.hint)}` : "",
+            `Reference structure: ${deterministic.files.map((f) => f.path).join(", ")}`,
+          ]
+            .filter(Boolean)
+            .join("\n"),
         },
       ],
       mockResult: () => deterministic,
@@ -344,55 +390,67 @@ async function executeCode(ctx: RunContext, j: JobRow, step: StepRow, _all: Step
     art.testReport.passed = Math.max(0, art.testReport.passed - 1);
   }
   const db = getDb();
+  const archive = zipArtifact(art);
   const zip = await storeFile(ctx.deps, db, {
     tenantId: j.tenantId,
     jobId: j.id,
     stepId: step.id,
     filename: `${slugify(j.title, 40)}-source.zip`,
     mime: "application/zip",
-    bytes: zipArtifact(art),
+    bytes: archive.bytes,
     kind: "code",
-    meta: { stepKey: step.key, attempt, files: art.files.length, provider: res.family, model: res.model, testReport: { passed: art.testReport.passed, failed: art.testReport.failed, simulated: art.testReport.simulated } },
+    meta: {
+      stepKey: step.key,
+      attempt,
+      files: art.files.length - archive.rejected.length,
+      rejectedPaths: archive.rejected,
+      provider: res.family,
+      model: res.model,
+      testReport: { passed: art.testReport.passed, failed: art.testReport.failed, simulated: art.testReport.simulated },
+    },
   });
   return {
     output: {
       summary: art.summary,
-      files: art.files.map((f) => f.path),
+      files: art.files.map((f) => f.path).filter((p) => !archive.rejected.includes(p)),
+      rejectedPaths: archive.rejected,
       testReport: art.testReport,
       assets: [{ assetId: zip.id, filename: zip.filename, kind: "code" }],
       provider: res.family,
       model: res.model,
     },
-    summary: `${truncate(art.summary, 140)} (${res.family === "mock" ? "deterministic mock" : `${res.family}/${res.model}`})`,
+    summary: `${truncate(art.summary, 140)} (${res.family === "mock" ? "deterministic mock" : `${res.family}/${res.model}`})${archive.rejected.length ? ` — ${archive.rejected.length} unsafe path(s) rejected` : ""}`,
   };
+}
+
+/** True when a test report carries no evidence that the tests were actually executed. */
+export function testsUnverified(report: CodeArtifact["testReport"] | null | undefined): boolean {
+  return !report || report.simulated === true || !Array.isArray(report.tests) || report.tests.length === 0;
 }
 
 async function executeTest(ctx: RunContext, j: JobRow, step: StepRow, all: StepRow[], attempt: number): Promise<StepOutcome> {
   const impl = [...all].reverse().find((s) => s.kind === "code" && upstreamKeys(step, all).has(s.key));
   const report = outputOf(impl).testReport as CodeArtifact["testReport"] | undefined;
   const failed = report?.failed ?? 0;
+  const unverified = testsUnverified(report);
+  const result = !report
+    ? "No test report found on the implementation step."
+    : unverified
+      ? `UNVERIFIED — tests generated but not executed in this environment (${report.tests.length} test${report.tests.length === 1 ? "" : "s"} written, self-reported ${report.failed === 0 ? "pass" : `${report.failed} failing`}; run \`npm test\` to verify)`
+      : `${report.failed === 0 ? "PASS" : "FAIL"} — ${report.passed} passed, ${report.failed} failed (${report.runner})`;
+  // Deterministic report: no model call (the numbers must never be paraphrased or paid for).
   const markdown = [
     `# ${step.name} — ${j.title}`,
     "",
     "## Result",
-    report ? `${report.failed === 0 ? "PASS" : "FAIL"} — ${report.passed} passed, ${report.failed} failed (${report.runner})` : "No test report found on the implementation step.",
+    result,
     "",
     "## Tests",
-    ...(report?.tests ?? []).map((t) => `- [${t.status === "passed" ? "x" : " "}] ${t.name}${t.error ? ` — ${t.error}` : ""}`),
+    ...(report?.tests ?? []).map((t) => `- [${unverified ? "?" : t.status === "passed" ? "x" : " "}] ${t.name}${t.error ? ` — ${t.error}` : ""}`),
     "",
     "## Coverage of acceptance criteria",
     ...step.acceptance.map((a) => `- ${a}`),
   ].join("\n");
-  const res = await callIntelligence(ctx, {
-    task: "log_analysis",
-    schema: documentSchema,
-    schemaName: "test_report",
-    messages: [
-      { role: "system", content: 'Summarise this automated test report as Markdown in JSON {"markdown": "..."}. Do not change any numbers.' },
-      { role: "user", content: markdown },
-    ],
-    mockResult: () => ({ markdown }),
-  });
   const db = getDb();
   const file = await storeFile(ctx.deps, db, {
     tenantId: j.tenantId,
@@ -402,12 +460,17 @@ async function executeTest(ctx: RunContext, j: JobRow, step: StepRow, all: StepR
     mime: "text/markdown",
     bytes: strToU8(markdown),
     kind: "document",
-    meta: { stepKey: step.key, attempt },
+    meta: { stepKey: step.key, attempt, testsExecuted: !unverified },
   });
-  void res;
+  ctx.provider = "deterministic";
+  ctx.model = "test-report";
   return {
-    output: { markdown, testReport: report ?? null, assets: [{ assetId: file.id, filename: file.filename, kind: "document" }] },
-    summary: report ? `Test run: ${report.passed}/${report.tests.length} passing${failed ? ` — ${failed} failing` : ""}` : "No tests found",
+    output: { markdown, testReport: report ?? null, testsExecuted: !unverified, assets: [{ assetId: file.id, filename: file.filename, kind: "document" }] },
+    summary: !report
+      ? "No tests found"
+      : unverified
+        ? `Tests generated but not executed in this environment (${report.tests.length} written${failed ? `, ${failed} self-reported failing` : ""})`
+        : `Test run: ${report.passed}/${report.tests.length} passing${failed ? ` — ${failed} failing` : ""}`,
   };
 }
 
@@ -423,6 +486,7 @@ async function executeTranslate(ctx: RunContext, j: JobRow, step: StepRow, _all:
   let first = true;
   let provider = "mock";
   for (const language of languages) {
+    await ctx.checkpoint();
     const template = buildSrt({ title: j.title, language, index: 0, overlap: false });
     const cues = template
       .split("\n\n")
@@ -434,7 +498,7 @@ async function executeTranslate(ctx: RunContext, j: JobRow, step: StepRow, _all:
       schemaName: "subtitle_cues",
       messages: [
         { role: "system", content: `Translate each subtitle cue into ${language}. Keep brand and product names untranslated. Return JSON {"cues": [...]} with the same number of cues.` },
-        { role: "user", content: cues.join("\n") },
+        { role: "user", content: wrapUntrusted("subtitle cues", cues.join("\n")) },
       ],
       mockResult: () => ({ cues }),
     });
@@ -541,12 +605,60 @@ async function executeStep(ctx: RunContext, j: JobRow, step: StepRow, deps: Agen
   }
 }
 
+function isStale(err: unknown): boolean {
+  return err instanceof ConcurrentTransitionError || err instanceof InvalidTransitionError;
+}
+
 /**
- * step-execute handler. Validates the dispatch (stale/duplicate attempts are
- * ignored), runs the step as a new agent_run, records the outcome through
- * transition(), triggers Recovery on a QA failure and always re-ticks the
- * workflow. Errors are handled here (pg-boss retryLimit is 0 for this queue):
- * the orchestrator retries failed steps within maxAttempts.
+ * Write a step outcome only if the step is still RUNNING THIS ATTEMPT. A late
+ * result from an attempt that timed out (and was already failed/retried by
+ * the job monitor) is discarded with an event instead of overwriting newer
+ * state. Returns false when discarded.
+ */
+async function writeOutcome(
+  deps: AgentDeps,
+  input: Omit<TransitionInput, "expectFrom" | "match" | "machine"> & { attempt: number; jobId: string; stepName: string },
+): Promise<boolean> {
+  const { attempt, jobId, stepName, ...rest } = input;
+  try {
+    await transition(getDb(), { ...rest, machine: "step", expectFrom: ["running"], match: { attempts: attempt } });
+    return true;
+  } catch (err) {
+    if (!isStale(err)) throw err;
+    deps.log.warn({ stepId: rest.id, attempt, error: safeError(err, 200) }, "stale step result discarded");
+    await emitEvent(getDb(), {
+      tenantId: rest.tenantId,
+      type: "step.stale_result",
+      level: "warn",
+      agent: "orchestrator",
+      subjectType: "step",
+      subjectId: rest.id,
+      jobId,
+      message: `Discarded a late result for ${stepName} (attempt ${attempt}) — the step has moved on`,
+      data: { attempt, attemptedTo: rest.to },
+    });
+    return false;
+  }
+}
+
+async function tick(deps: AgentDeps, tenantId: string, jobId: string) {
+  try {
+    await deps.queue.send(QUEUES.workflowTick, { tenantId, jobId }, { singletonKey: jobId });
+  } catch (err) {
+    // During shutdown the queue may already be stopping; the job monitor re-ticks active jobs.
+    deps.log.warn({ jobId, error: safeError(err, 200) }, "could not enqueue workflow tick");
+  }
+}
+
+/**
+ * step-execute handler. Claims the step with a lock-like transition (ready →
+ * running for exactly this attempt — a racing duplicate stops), runs it as a
+ * new agent_run with the queue's abort signal, records the outcome only if
+ * the step is still on this attempt, triggers Recovery on a QA failure and
+ * always re-ticks the workflow. Errors are handled here (pg-boss retryLimit
+ * is 0 for this queue): the orchestrator retries failed steps within
+ * maxAttempts. A shutdown returns the step to `ready` without consuming the
+ * attempt; an ambiguous paid submission blocks it for the owner.
  */
 export async function runStepExecute(payload: QueuePayloads["step-execute"], deps: AgentDeps) {
   const db = getDb();
@@ -556,26 +668,35 @@ export async function runStepExecute(payload: QueuePayloads["step-execute"], dep
   if (!j || !step) return { status: "skipped" as const, reason: "not found" };
   if (!["executing", "qa", "repairing"].includes(j.status)) return { status: "skipped" as const, reason: `job is ${j.status}` };
   if (step.status !== "ready" || step.attempts + 1 !== attempt) return { status: "skipped" as const, reason: `stale dispatch (step ${step.status}, attempts ${step.attempts})` };
+  if (abortReasonOf(deps)) return { status: "skipped" as const, reason: "worker is stopping" };
 
   const actor = { type: "agent" as const, id: step.agent };
   const agent = agentKey(step.agent);
-  await transition(db, {
-    machine: "step",
-    id: step.id,
-    tenantId,
-    to: "running",
-    actor,
-    patch: { attempts: attempt, startedAt: new Date(), finishedAt: null, error: null },
-    event: {
-      type: "step.started",
-      level: "info",
-      agent,
-      subjectType: "step",
-      subjectId: step.id,
-      jobId,
-      message: `${AGENTS[agent].name} started ${step.name}${attempt > 1 ? ` (attempt ${attempt}/${step.maxAttempts})` : ""} for ${quote(j.title, 50)}`,
-    },
-  });
+  try {
+    await transition(db, {
+      machine: "step",
+      id: step.id,
+      tenantId,
+      to: "running",
+      actor,
+      expectFrom: ["ready"],
+      requireChange: true,
+      match: { attempts: attempt - 1 },
+      patch: { attempts: attempt, startedAt: new Date(), finishedAt: null, error: null },
+      event: {
+        type: "step.started",
+        level: "info",
+        agent,
+        subjectType: "step",
+        subjectId: step.id,
+        jobId,
+        message: `${AGENTS[agent].name} started ${step.name}${attempt > 1 ? ` (attempt ${attempt}/${step.maxAttempts})` : ""} for ${quote(j.title, 50)}`,
+      },
+    });
+  } catch (err) {
+    if (isStale(err)) return { status: "skipped" as const, reason: "another worker claimed this attempt" };
+    throw err;
+  }
   const running = { ...step, status: "running" as const, attempts: attempt };
 
   let outcome: StepOutcome;
@@ -597,21 +718,86 @@ export async function runStepExecute(payload: QueuePayloads["step-execute"], dep
       },
       async (ctx) => {
         runId = ctx.runId;
+        await ctx.checkpoint();
         const o = await executeStep(ctx, j, running, deps, attempt);
+        await ctx.checkpoint();
         ctx.summary = o.summary;
         return o;
       },
     );
   } catch (err) {
     const message = safeError(err, 400);
+    const reason = abortReasonOf(deps) ?? (err instanceof StepAbortedError ? err.reason : null);
+
+    // Worker shutdown: hand the step back WITHOUT consuming the attempt; the restarted worker resumes it.
+    if (reason === "shutdown") {
+      const ok = await writeOutcome(deps, {
+        id: step.id,
+        tenantId,
+        to: "ready",
+        actor: { type: "system", id: "worker-shutdown" },
+        reason: "interrupted by worker shutdown — attempt not consumed",
+        patch: { attempts: attempt - 1, startedAt: null, error: null },
+        event: { type: "step.interrupted", level: "warn", agent, subjectType: "step", subjectId: step.id, jobId, message: `${step.name} was interrupted by a worker restart — it will resume without using an attempt` },
+        attempt,
+        jobId,
+        stepName: step.name,
+      });
+      await tick(deps, tenantId, jobId);
+      return { status: ok ? ("interrupted" as const) : ("stale" as const), error: message };
+    }
+
+    // Owner cancelled the job: the cancel cascade already closed the step.
+    if (reason === "cancelled") {
+      await writeOutcome(deps, {
+        id: step.id,
+        tenantId,
+        to: "cancelled",
+        actor: { type: "system", id: "cancel" },
+        reason: "job cancelled",
+        patch: { finishedAt: new Date(), error: "job cancelled" },
+        attempt,
+        jobId,
+        stepName: step.name,
+      });
+      return { status: "cancelled" as const };
+    }
+
+    // The provider may have accepted a paid job: never retry automatically.
+    if (isProviderError(err) && err.code === "ambiguous_submission") {
+      const ok = await writeOutcome(deps, {
+        id: step.id,
+        tenantId,
+        to: "blocked",
+        actor: { type: "agent", id: "orchestrator" },
+        reason: "provider submission outcome unknown — owner must verify",
+        patch: { error: message, finishedAt: new Date(), output: { ...outputOf(step), blockedReason: "ambiguous_submission", blockedAt: new Date().toISOString(), provider: err.provider } },
+        event: { type: "step.blocked", level: "warn", agent, subjectType: "step", subjectId: step.id, jobId, message: `${step.name} paused: ${err.provider} may have accepted the request — verify on the provider before retrying` },
+        attempt,
+        jobId,
+        stepName: step.name,
+      });
+      if (ok) {
+        await notify(db, {
+          tenantId,
+          kind: "alert",
+          title: `Verify on ${err.provider} before retrying “${step.name.slice(0, 60)}”`,
+          body: `“${j.title.slice(0, 80)}”: the request to ${err.provider} timed out or was interrupted after it was sent, so it may have been accepted (and billed). Check the ${err.provider} dashboard, then resume the job — GigPilot will not resubmit automatically.`,
+          link: `/jobs/${j.id}`,
+          dedupeKey: `ambiguous-step:${step.id}:${attempt}`,
+        });
+      }
+      await tick(deps, tenantId, jobId);
+      return { status: ok ? ("blocked" as const) : ("stale" as const), error: message };
+    }
+
     const blocked = err instanceof BudgetBlockedError;
-    await transition(db, {
-      machine: "step",
+    const ok = await writeOutcome(deps, {
       id: step.id,
       tenantId,
       to: "failed",
       actor,
-      patch: { error: message, finishedAt: new Date() },
+      patch: { error: reason === "timeout" ? `Timed out: ${message}` : message, finishedAt: new Date() },
       event: {
         type: "step.failed",
         level: blocked ? "warn" : "error",
@@ -621,8 +807,11 @@ export async function runStepExecute(payload: QueuePayloads["step-execute"], dep
         jobId,
         message: `${step.name} failed (attempt ${attempt}/${step.maxAttempts}): ${truncate(message, 200)}`,
       },
+      attempt,
+      jobId,
+      stepName: step.name,
     });
-    if (blocked) {
+    if (ok && blocked) {
       await transition(db, {
         machine: "step",
         id: step.id,
@@ -630,29 +819,33 @@ export async function runStepExecute(payload: QueuePayloads["step-execute"], dep
         to: "blocked",
         actor: { type: "agent", id: "orchestrator" },
         reason: "spend limit — waiting for the owner",
-        patch: { output: { ...outputOf(step), blockedReason: "budget" } },
+        expectFrom: ["failed"],
+        patch: { output: { ...outputOf(step), blockedReason: "budget", blockedAt: new Date().toISOString() } },
       });
     }
-    await deps.queue.send(QUEUES.workflowTick, { tenantId, jobId }, { singletonKey: jobId });
+    await tick(deps, tenantId, jobId);
+    if (!ok) return { status: "stale" as const, error: message };
     return { status: blocked ? ("blocked" as const) : ("failed" as const), error: message };
   }
 
   if (outcome.verdict === "fail") {
-    await transition(db, {
-      machine: "step",
+    const ok = await writeOutcome(deps, {
       id: step.id,
       tenantId,
       to: "failed",
       actor,
       patch: { output: outcome.output, error: truncate(outcome.summary, 500), finishedAt: new Date() },
+      attempt,
+      jobId,
+      stepName: step.name,
     });
+    if (!ok) return { status: "stale" as const };
     await recoverFromQaFailure({ tenantId, jobId, qaStepId: step.id, parentRunId: runId }, deps);
-    await deps.queue.send(QUEUES.workflowTick, { tenantId, jobId }, { singletonKey: jobId });
+    await tick(deps, tenantId, jobId);
     return { status: "qa_failed" as const, summary: outcome.summary };
   }
 
-  await transition(db, {
-    machine: "step",
+  const ok = await writeOutcome(deps, {
     id: step.id,
     tenantId,
     to: "succeeded",
@@ -672,7 +865,11 @@ export async function runStepExecute(payload: QueuePayloads["step-execute"], dep
       jobId,
       message: `${step.name} done — ${truncate(outcome.summary, 200)}`,
     },
+    attempt,
+    jobId,
+    stepName: step.name,
   });
-  await deps.queue.send(QUEUES.workflowTick, { tenantId, jobId }, { singletonKey: jobId });
+  if (!ok) return { status: "stale" as const, summary: outcome.summary };
+  await tick(deps, tenantId, jobId);
   return { status: "succeeded" as const, summary: outcome.summary };
 }

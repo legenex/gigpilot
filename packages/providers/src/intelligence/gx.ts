@@ -3,7 +3,7 @@ import { setting, envValue } from "../lib/config";
 import { credentialSource, resolveCredential } from "../lib/credentials";
 import { ProviderError, codeForStatus } from "../lib/errors";
 import { HttpError, bodySnippet, safeFetch, type FetchLike } from "../lib/http";
-import { Semaphore } from "../lib/limiter";
+import { Semaphore, SemaphoreTimeoutError } from "../lib/limiter";
 import { jsonSchemaFor, mergeSystemMessages, parseAndValidate, repairMessages } from "../lib/structured";
 import { normalizeStructured, schemaGuide, schemaNameFor, structuredSystemPrompt } from "./prompts";
 
@@ -26,11 +26,33 @@ import { normalizeStructured, schemaGuide, schemaNameFor, structuredSystemPrompt
  * only, when the backend rejects a format (remembered per model). Output is
  * validated with the zod schema; ONE repair round-trip on failure.
  *
- * Concurrency: process-wide semaphore (GX_MAX_CONCURRENCY, default 2 —
- * gx-mini has 2 slots). Timeout GX_TIMEOUT_MS.
+ * Concurrency: process-wide semaphores (GX_MAX_CONCURRENCY, default 2 —
+ * gx-mini has 2 slots; GX_CODE_MAX_CONCURRENCY for gx-code). Waiting for a
+ * slot is bounded by GX_ACQUIRE_TIMEOUT_MS (→ ProviderError "timeout", so the
+ * router falls through / trips its breaker instead of piling up). Waiters are
+ * served by task priority (see `gxTaskPriority`). Request timeout GX_TIMEOUT_MS.
  */
 
 const FAST_TASKS = new Set<IntelligenceTask>(["triage", "extract", "classify", "summarise", "dedupe", "tag", "qa_basic", "log_analysis"]);
+
+/**
+ * Slot priority (higher first). Owner-facing production, QA, recovery,
+ * proposals and client messages overtake background work so a won job never
+ * waits behind a backlog of opportunity refinements:
+ *   2 — everything else (code, plan_production, qa_*, recovery, proposal, client_message, …)
+ *   1 — market_research
+ *   0 — analyse_opportunity (background refinement)
+ */
+export function gxTaskPriority(task: IntelligenceTask): number {
+  if (task === "analyse_opportunity") return 0;
+  if (task === "market_research") return 1;
+  return 2;
+}
+
+/** True when the task runs on the shared heavy model (gx-code), i.e. counts against the tenant GX quota. */
+export function isHeavyGxTask(task: IntelligenceTask): boolean {
+  return !FAST_TASKS.has(task);
+}
 
 /** Default output budgets per task (the gateway clamps to the model maximum). */
 function defaultMaxTokens(task: IntelligenceTask, structured: boolean): number {
@@ -99,6 +121,11 @@ export class GxProvider implements IntelligenceProvider {
     return 0;
   }
 
+  /** True when the task runs on the heavy shared model (gx-code). */
+  static isHeavyTask(task: IntelligenceTask): boolean {
+    return isHeavyGxTask(task);
+  }
+
   /** Model id for a task (never gx-max). */
   modelFor(task: IntelligenceTask): string {
     if (this.opts.model) return assertNotMax(this.opts.model);
@@ -133,7 +160,7 @@ export class GxProvider implements IntelligenceProvider {
     let answeredModel = model;
     const attempts = structured ? 2 : 1;
     for (let attempt = 0; attempt < attempts; attempt++) {
-      const res = await this.chat({ base, key, model, messages, maxTokens, temperature, schemaName, jsonSchema, signal: req.signal });
+      const res = await this.chat({ base, key, model, messages, maxTokens, temperature, schemaName, jsonSchema, signal: req.signal, priority: gxTaskPriority(req.task) });
       inputTokens += res.inputTokens;
       outputTokens += res.outputTokens;
       lastText = res.text;
@@ -172,6 +199,7 @@ export class GxProvider implements IntelligenceProvider {
     schemaName: string;
     jsonSchema?: Record<string, unknown>;
     signal?: AbortSignal;
+    priority?: number;
   }): Promise<{ text: string; inputTokens: number; outputTokens: number; model?: string; finishReason?: string }> {
     let level: FormatLevel = p.jsonSchema ? (formatSupport.get(p.model) ?? "json_schema") : "none";
     for (;;) {
@@ -180,14 +208,17 @@ export class GxProvider implements IntelligenceProvider {
       else if (level === "json_object") body.response_format = { type: "json_object" };
 
       const heavy = p.model !== setting("GX_MODEL_FAST");
+      const waitOpts = { priority: p.priority ?? 2, timeoutMs: setting("GX_ACQUIRE_TIMEOUT_MS") };
+      const slotError = (err: unknown, what: string) =>
+        new ProviderError("gx", "timeout", err instanceof SemaphoreTimeoutError ? `${err.message} (${what}) — GX is saturated` : `aborted while waiting for ${what}`);
       const releaseHeavy = heavy
-        ? await heavySlots.acquire(p.signal).catch(() => {
-            throw new ProviderError("gx", "timeout", "aborted while waiting for a gx-code slot");
+        ? await heavySlots.acquire(p.signal, waitOpts).catch((err: unknown) => {
+            throw slotError(err, "a gx-code slot");
           })
         : () => {};
-      const releaseSlot = await slots.acquire(p.signal).catch(() => {
+      const releaseSlot = await slots.acquire(p.signal, waitOpts).catch((err: unknown) => {
         releaseHeavy();
-        throw new ProviderError("gx", "timeout", "aborted while waiting for a GX slot");
+        throw slotError(err, "a GX slot");
       });
       const release = () => {
         releaseSlot();

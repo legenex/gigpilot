@@ -224,8 +224,9 @@ export class KieProvider implements CreativeProvider {
     return (setting("KIE_BASE_URL") || "https://api.kie.ai").replace(/\/+$/, "");
   }
 
-  private sleep(ms: number): Promise<void> {
-    return this.opts.sleep ? this.opts.sleep(ms) : new Promise((r) => setTimeout(r, ms));
+  private sleep(ms: number, signal?: AbortSignal): Promise<void> {
+    if (this.opts.sleep) return this.opts.sleep(ms);
+    return abortableSleep(ms, signal);
   }
 
   private envelopeError(res: SafeResponse, key: string, env?: KieEnvelope<unknown>): ProviderError | undefined {
@@ -247,15 +248,19 @@ export class KieProvider implements CreativeProvider {
     if (estimate !== null && estimate > req.maxCostUsd) throw new ProviderError("kie", "budget_exceeded", `estimated $${estimate.toFixed(4)} exceeds maxCostUsd $${req.maxCostUsd.toFixed(4)}`);
 
     const input = buildKieInput(option.model, req);
-    const http = { allowHosts: ALLOWED_HOSTS, fetch: this.opts.fetch, redact: [key] };
+    const signal = req.signal;
+    const http = { allowHosts: ALLOWED_HOSTS, fetch: this.opts.fetch, redact: [key], signal };
     const headers = { authorization: `Bearer ${key}`, "content-type": "application/json" };
+    if (signal?.aborted) throw new ProviderError("kie", "timeout", "aborted before submission — nothing was sent");
 
     // --- create (never retried after ambiguity) ---
     let createRes: SafeResponse;
     try {
       createRes = await safeFetch(`${this.base()}/api/v1/jobs/createTask`, { method: "POST", headers, body: JSON.stringify({ model: option.model, input }) }, { ...http, timeoutMs: 30_000, retries: 1, retryOn: (i) => i.status === 429 });
     } catch (err) {
-      if (err instanceof HttpError && err.code === "timeout") throw new ProviderError("kie", "ambiguous_submission", "createTask timed out — the task may exist; not retried automatically");
+      if (err instanceof HttpError && (err.code === "timeout" || err.code === "aborted")) {
+        throw new ProviderError("kie", "ambiguous_submission", `createTask ${err.code === "aborted" ? "was interrupted" : "timed out"} — the task may exist; verify on Kie before retrying (not retried automatically)`, { retryable: false });
+      }
       throw new ProviderError("kie", "unavailable", err instanceof Error ? err.message : "createTask failed");
     }
     let created: KieEnvelope<{ taskId?: string }>;
@@ -276,8 +281,20 @@ export class KieProvider implements CreativeProvider {
     const deadline = Date.now() + timeoutMs;
     let record: KieRecord | undefined;
     let transientFailures = 0;
+    const pendingFailure = (why: string): CreativeOutput => ({
+      provider: "kie",
+      model: option.model,
+      status: "failed",
+      files: [],
+      externalTaskId: taskId,
+      costUsd: estimate ?? 0,
+      costSource: estimate === null ? "unknown" : "catalog",
+      latencyMs: Date.now() - started,
+      error: `${why} waiting for task ${taskId} (it may still complete and be billed)`,
+    });
     for (;;) {
-      await this.sleep(interval);
+      await this.sleep(interval, signal);
+      if (signal?.aborted) return pendingFailure("aborted");
       interval = Math.min(maxInterval, Math.round(interval * 1.3));
       try {
         const res = await safeFetch(`${this.base()}/api/v1/jobs/recordInfo?taskId=${encodeURIComponent(taskId)}`, { headers: { authorization: `Bearer ${key}` } }, { ...http, timeoutMs: 20_000, retries: 2 });
@@ -290,24 +307,13 @@ export class KieProvider implements CreativeProvider {
         record = env.data;
         transientFailures = 0;
       } catch (err) {
+        if (signal?.aborted) return pendingFailure("aborted");
         if (err instanceof ProviderError) throw err;
         if (++transientFailures >= 5) throw new ProviderError("kie", "unavailable", `polling task ${taskId} failed repeatedly: ${err instanceof Error ? err.message : "unknown"}`, { meta: { taskId } });
       }
       const state = record?.state;
       if (state === "success" || state === "fail") break;
-      if (Date.now() >= deadline) {
-        return {
-          provider: "kie",
-          model: option.model,
-          status: "failed",
-          files: [],
-          externalTaskId: taskId,
-          costUsd: estimate ?? 0,
-          costSource: estimate === null ? "unknown" : "catalog",
-          latencyMs: Date.now() - started,
-          error: `timed out after ${Math.round(timeoutMs / 1000)} s waiting for task ${taskId} (it may still complete and be billed)`,
-        };
-      }
+      if (Date.now() >= deadline) return pendingFailure(`timed out after ${Math.round(timeoutMs / 1000)} s`);
     }
 
     const creditsUsd = kieCreditsToUsd(record?.creditsConsumed);
@@ -338,6 +344,7 @@ export class KieProvider implements CreativeProvider {
         maxBytes: isVideo ? 300 * 1024 * 1024 : 50 * 1024 * 1024,
         fetch: this.opts.fetch,
         lookup: this.opts.lookup,
+        signal,
       });
       return { provider: "kie", model: option.model, status: "succeeded", files, externalTaskId: taskId, ...cost, latencyMs: Date.now() - started };
     } catch (err) {
@@ -378,6 +385,20 @@ export class KieProvider implements CreativeProvider {
       return { status: "unavailable", detail: err instanceof Error ? err.message : "Kie health check failed", latencyMs: Date.now() - started, checkedAt };
     }
   }
+}
+
+/** setTimeout that resolves early when the signal aborts (callers re-check `signal.aborted`). */
+export function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener("abort", done, { once: true });
+  });
 }
 
 function header(headers: Headers | Record<string, string | string[] | undefined>, name: string): string | undefined {

@@ -4,8 +4,8 @@
 
 | Service | URL | Bind |
 |---|---|---|
-| Marketing site | http://100.105.214.61:4710 | docker `127.0.0.1:4710` → `gigpilot-ts-proxy@4710` on the Tailscale IP |
-| Dashboard (app) | http://100.105.214.61:4711 | docker `127.0.0.1:4711` → `gigpilot-ts-proxy@4711` |
+| Marketing site | http://100.105.214.61:4710 | docker `127.0.0.1:4710` ← Caddy `edge` on the Tailscale IP |
+| Dashboard (app) | http://100.105.214.61:4711 | docker `127.0.0.1:4711` ← Caddy `edge` on the Tailscale IP |
 | Worker health + supervision API | http://127.0.0.1:4712 (`/healthz`, `/readyz`, `/api/supervision/*`) | loopback only |
 | PostgreSQL 17 | 127.0.0.1:4715 (db `gigpilot`; dev `gigpilot_dev`; tests `gigpilot_test`) | loopback only |
 
@@ -27,12 +27,14 @@ Verified free on 2026-09-26 (`ss -tlnp`); nothing else on the host uses 47xx.
 
 ## Layout
 
-- Compose project **`gigpilot`**: `db`, `migrate` (one-shot), `web`, `app`, `worker` — `ops/gx10-01/compose.yml`.
+- Compose project **`gigpilot`**: `db`, `migrate` (one-shot), `web`, `app`, `worker`, `edge` — `ops/gx10-01/compose.yml`.
+- **`edge`** (Caddy, host networking) binds only the Tailscale IPv4 on 4710/4711 and proxies to the loopback ports. It overwrites `X-Forwarded-For` with the real tailnet peer address (no trusted proxies), so per-IP auth rate limits cannot be spoofed, and never buffers the SSE stream. If Tailscale is not up at boot the bind fails and Docker's restart policy retries until it is.
+- The apps connect to Postgres as **`gigpilot_app`** (non-superuser: data access on app tables, owner of the pg-boss schema only). Migrations run as the owner role `gigpilot`. `sql/app-role.sql` is applied idempotently by every deploy.
 - Image: `gigpilot:<sha12>[-dirty]-<ts>` built from `ops/docker/Dockerfile` (one image, role chosen by command).
 - Runtime dir `/srv/projects/gigpilot` (0700): `secrets/` (generated, never committed), `config/gigpilot.env` (non-secret), `backups/`, `notes/` (releases/backups logs), `status/agentos.json` (worker snapshot for AgentOS), `release.env` (current image tag).
 - External volumes `gigpilot_pgdata`, `gigpilot_storage` (a `down -v` cannot delete data).
 - Networks: `gigpilot_internal` (db) and external `gx_gateway` (worker/app reach GX at `http://gx-litellm:4000/v1`).
-- systemd **user** units (linger is enabled): `gigpilot-ts-proxy@4710`, `gigpilot-ts-proxy@4711` (socat; waits for the Tailscale IP, `Restart=always`), `gigpilot-backup.timer` (03:05 nightly, before gx-backup's 03:30 restic snapshot).
+- systemd **user** unit (linger is enabled): `gigpilot-backup.timer` (03:05 nightly, before gx-backup's 03:30 restic snapshot). (The earlier socat `gigpilot-ts-proxy@` units were replaced by the `edge` service; deploy/install disable them.)
 
 Containers: `restart: unless-stopped`, health checks on every service, read-only root FS,
 `cap_drop: ALL`, `no-new-privileges`, uid 10001, memory/cpu/pids limits, json-file logs 10m×5.
@@ -47,7 +49,7 @@ docker compose -p gigpilot -f ops/gx10-01/compose.yml --env-file /srv/projects/g
 docker compose -p gigpilot -f ops/gx10-01/compose.yml --env-file /srv/projects/gigpilot/release.env logs -f worker
 ops/gx10-01/scripts/backup.sh            # manual backup (db dump + storage tarball)
 ops/gx10-01/scripts/restore.sh <dump> --yes-replace-database
-systemctl --user status gigpilot-ts-proxy@4710 gigpilot-ts-proxy@4711
+ops/gx10-01/scripts/purge-test-accounts.sh [--yes]   # remove example.com / gigpilot.dev test accounts
 curl -s http://127.0.0.1:4712/readyz
 ```
 
@@ -63,7 +65,9 @@ curl -s -X POST -H "Authorization: Bearer $T" -H "Idempotency-Key: $(uuidgen)" \
 ## Shared-host rules
 
 Only touch Docker resources prefixed `gigpilot`. Never `docker system prune`, never restart
-the Docker daemon, never bind `0.0.0.0` on the host. Never use `gx-max` from GigPilot.
+the Docker daemon, never bind `0.0.0.0` on the host. Never use `gx-max` from GigPilot, and keep
+GigPilot to one concurrent gx-code request (`GX_CODE_MAX_CONCURRENCY=1`): gx-code has one slot per
+node and is shared with AgentOS.
 
 ## Secrets & credentials
 

@@ -3,15 +3,16 @@
 import {
   CommandError,
   clearProviderSecret,
+  recordIntegrationHealth,
   saveProviderSecret,
   setProviderEnabled,
   setSourceEnabled,
   triggerSourceRefresh,
   type CommandContext,
 } from "@gigpilot/agents";
-import { SOURCE_KEYS, integrationByKey } from "@gigpilot/contracts";
-import { and, eq, getDb, providerIntegration, sourceIntegration } from "@gigpilot/db";
-import { checkIntegration, clearCredentialCache } from "@gigpilot/providers";
+import { integrationByKey } from "@gigpilot/contracts";
+import { and, audit, eq, getDb, saveTenantSecret, sourceIntegration } from "@gigpilot/db";
+import { INBOUND_SECRET_NAME, INBOUND_SECRET_PROVIDER_KEY, checkIntegration, clearCredentialCache } from "@gigpilot/providers";
 import { runAction } from "./run";
 
 const PATHS = ["/integrations", "/"];
@@ -72,8 +73,8 @@ export async function refreshAllSourcesAction() {
 }
 
 /**
- * Zero-cost connection test via the providers package, persisted to the
- * tenant's integration row. Returns only secret-free health fields.
+ * Zero-cost connection test via the providers package, persisted through the
+ * `recordIntegrationHealth` command. Returns only secret-free health fields.
  */
 export async function testConnectionAction(key: string) {
   return runAction(
@@ -85,20 +86,37 @@ export async function testConnectionAction(key: string) {
       const health = await checkIntegration(key, ctx.tenantId);
       const latencyMs = health.latencyMs ?? Date.now() - started;
       const detail = String(health.detail ?? "").slice(0, 500);
-      const db = getDb();
-      if ((SOURCE_KEYS as readonly string[]).includes(key)) {
-        await db
-          .update(sourceIntegration)
-          .set({ status: health.status, statusDetail: detail, lastError: health.status === "error" ? detail : null })
-          .where(and(eq(sourceIntegration.tenantId, ctx.tenantId), eq(sourceIntegration.sourceKey, key)));
-      } else {
-        await db
-          .update(providerIntegration)
-          .set({ status: health.status, statusDetail: detail, latencyMs, meta: health.meta ?? null, lastCheckAt: new Date() })
-          .where(and(eq(providerIntegration.tenantId, ctx.tenantId), eq(providerIntegration.providerKey, key)));
-      }
+      await recordIntegrationHealth(ctx, key, { ...health, detail, latencyMs });
       return { status: health.status, detail, latencyMs };
     },
     { revalidate: PATHS, limit: 12 },
+  );
+}
+
+/** A browser-generated inbound secret: "gpwh_" + 32 random bytes as hex. */
+const INBOUND_SECRET_FORMAT = /^gpwh_[0-9a-f]{64}$/;
+
+/**
+ * Store (or rotate) this workspace's inbound webhook secret. The secret is
+ * generated in the owner's browser (crypto.getRandomValues) and shown there
+ * exactly once; the server only ever receives it, encrypts it (AES-256-GCM,
+ * AAD-bound to tenant|inbound|INBOUND_WEBHOOK_SECRET) and never returns it —
+ * afterwards only the last-4 hint is displayed. Rotation invalidates the old
+ * secret immediately.
+ */
+export async function rotateInboundSecretAction(secret: string) {
+  return runAction(
+    "inbound.rotate",
+    async (ctx) => {
+      requireOperator(ctx);
+      if (typeof secret !== "string" || !INBOUND_SECRET_FORMAT.test(secret)) throw new CommandError("Invalid secret format — generate a new one.");
+      const db = getDb();
+      await db.transaction(async (tx) => {
+        await saveTenantSecret(tx, ctx.tenantId, INBOUND_SECRET_PROVIDER_KEY, INBOUND_SECRET_NAME, secret);
+        await audit(tx, { tenantId: ctx.tenantId, actor: { type: "user", id: ctx.userId }, action: "credential.saved", subjectType: "provider", data: { providerKey: INBOUND_SECRET_PROVIDER_KEY, name: INBOUND_SECRET_NAME, rotated: true } });
+      });
+      clearCredentialCache(ctx.tenantId);
+    },
+    { revalidate: PATHS, limit: 10, message: "Inbound secret saved — copy it now, it won't be shown again" },
   );
 }

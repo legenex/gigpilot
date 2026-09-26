@@ -7,11 +7,13 @@ import {
   getDb,
   getTenantSettings,
   idempotencyKey,
+  isNull,
   opportunity,
   proposal,
   sql,
   transition,
 } from "@gigpilot/db";
+import { isProviderError } from "@gigpilot/providers";
 import { createJobFromApplication } from "../domain/jobs";
 import { sourceOf, type AgentDeps } from "../deps";
 import { forTenant, isConfiguredFor } from "../lib/adapters";
@@ -93,7 +95,10 @@ export async function runApplicationSubmit(payload: QueuePayloads["application-s
       .returning({ key: idempotencyKey.key });
     if (inserted.length > 0) return { kind: "claimed" as const };
     const [existing] = await tx.select().from(idempotencyKey).where(eq(idempotencyKey.key, key)).limit(1);
-    if (existing?.result) return { kind: "done" as const, detail: "already submitted" };
+    const prior = existing?.result as { status?: string; externalRef?: string | null; detail?: string } | null | undefined;
+    // Submitted on the marketplace but the local write was lost: finish it, never resubmit.
+    if (prior?.status === "submitted") return { kind: "finish" as const, externalRef: prior.externalRef ?? null };
+    if (prior) return { kind: "done" as const, detail: `previous attempt ended ${prior.status ?? "unknown"}${prior.detail ? `: ${prior.detail}` : ""}` };
     const age = existing ? Date.now() - existing.createdAt.getTime() : 0;
     if (age < IN_FLIGHT_MS) return { kind: "in_flight" as const };
     return { kind: "stale" as const };
@@ -107,7 +112,51 @@ export async function runApplicationSubmit(payload: QueuePayloads["application-s
     claim = await claimOnce();
   }
 
+  const mode = adapter.key === "mock" ? "mock" : "api";
+  const recordSubmitted = async (externalRef: string | null, runId: string | null) => {
+    await db.transaction(async (tx) => {
+      // Same lock order as the claim (advisory lock → application row → idempotency row);
+      // without it a concurrent claim holding the row lock deadlocks against this update.
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${key}))`);
+      await tx.execute(sql`select id from ${application} where id = ${app.id} for update`);
+      await tx.update(idempotencyKey).set({ result: { status: "submitted", externalRef } }).where(eq(idempotencyKey.key, key));
+      await transition(tx, {
+        machine: "application",
+        id: app.id,
+        tenantId,
+        to: "submitted",
+        actor: { type: "agent", id: "client" },
+        reason: "owner-approved proposal submitted via official integration",
+        patch: { submittedAt: new Date(), submissionMode: mode, externalRef },
+        event: {
+          type: "application.submitted",
+          level: "success",
+          agent: "client",
+          runId,
+          subjectType: "application",
+          subjectId: app.id,
+          message: `Submitted ${quote(opp.title)} to ${adapter.name} at ${money(app.priceUsd ?? prop?.priceUsd ?? 0)}${mode === "mock" ? " (demo marketplace)" : ""}`,
+        },
+      });
+      const [o] = await tx.select({ status: opportunity.status }).from(opportunity).where(eq(opportunity.id, opp.id)).limit(1);
+      if (o?.status === "pursuing") {
+        await transition(tx, { machine: "opportunity", id: opp.id, tenantId, to: "applied", actor: { type: "agent", id: "client" } });
+      }
+    });
+  };
+
   if (claim.kind === "done") return { status: "skipped", detail: claim.detail };
+  const scheduleDemoAward = async () => {
+    if (adapter.key !== "mock") return;
+    // The demo client "reviews" the proposal and accepts after a short, deterministic delay.
+    const delay = 15 + (fnv(app.id) % 11);
+    await deps.queue.send(QUEUES.applicationAward, { tenantId, applicationId: app.id }, { singletonKey: app.id, startAfter: delay });
+  };
+  if (claim.kind === "finish") {
+    await recordSubmitted(claim.externalRef, null);
+    await scheduleDemoAward();
+    return { status: "submitted", detail: "completed the local record of an earlier submission", externalRef: claim.externalRef ?? undefined };
+  }
   if (claim.kind === "in_flight") return { status: "in_flight", detail: "another worker is submitting this application" };
   if (claim.kind === "stale" && adapter.key !== "mock") {
     await notify(db, {
@@ -121,67 +170,90 @@ export async function runApplicationSubmit(payload: QueuePayloads["application-s
     return { status: "ambiguous", detail: "previous attempt interrupted; owner must verify" };
   }
 
-  return runAgent(
-    { deps, tenantId, agent: "client", task: "application.submit", subjectType: "application", subjectId: app.id, idempotencyKey: key, label: `Submission of ${quote(opp.title)}` },
-    async (ctx) => {
-      const result = await adapter.submit!({
-        externalOpportunityId: opp.externalId,
-        coverLetter: prop?.coverLetter ?? "",
-        amountUsd: app.priceUsd ?? prop?.priceUsd ?? 0,
-        periodDays: prop?.timelineDays ?? 7,
-        idempotencyKey: app.idempotencyKey,
-      });
-      if (result.status !== "submitted") {
-        await db.update(idempotencyKey).set({ result: { status: result.status, detail: result.detail } }).where(eq(idempotencyKey.key, key));
+  // Until the marketplace call starts, a failure leaves nothing behind: release the claim so a
+  // retry can submit. Once it started, the outcome is unknown unless the adapter says otherwise.
+  let externalCallStarted = false;
+  let submitted: { externalRef: string | null } | null = null;
+  const releaseClaim = () => db.delete(idempotencyKey).where(and(eq(idempotencyKey.key, key), isNull(idempotencyKey.result)));
+  const markAmbiguous = async (detail: string) => {
+    await db.update(idempotencyKey).set({ result: { status: "ambiguous", detail: detail.slice(0, 300) } }).where(eq(idempotencyKey.key, key));
+    await notify(db, {
+      tenantId,
+      kind: "alert",
+      title: `Verify the submission on ${adapter.name}`,
+      body: `The submission of “${opp.title.slice(0, 80)}” may or may not have reached ${adapter.name} (${safeError(detail, 160)}). Check ${adapter.name} and mark it submitted if it arrived — GigPilot will not resubmit automatically.`,
+      link: `/applications?application=${app.id}`,
+      dedupeKey: `ambiguous-submit:${app.id}`,
+    });
+  };
+  try {
+    return await runAgent(
+      { deps, tenantId, agent: "client", task: "application.submit", subjectType: "application", subjectId: app.id, idempotencyKey: key, label: `Submission of ${quote(opp.title)}` },
+      async (ctx) => {
+        externalCallStarted = true;
+        let result: Awaited<ReturnType<NonNullable<typeof adapter.submit>>>;
+        try {
+          result = await adapter.submit!({
+            externalOpportunityId: opp.externalId,
+            coverLetter: prop?.coverLetter ?? "",
+            amountUsd: app.priceUsd ?? prop?.priceUsd ?? 0,
+            periodDays: prop?.timelineDays ?? 7,
+            idempotencyKey: app.idempotencyKey,
+          });
+        } catch (err) {
+          // Adapter convention: a ProviderError (other than ambiguous_submission) means nothing was submitted.
+          if (isProviderError(err) && err.code !== "ambiguous_submission") externalCallStarted = false;
+          throw err;
+        }
+        if (result.status !== "submitted") {
+          await db.update(idempotencyKey).set({ result: { status: result.status, detail: result.detail } }).where(eq(idempotencyKey.key, key));
+          await notify(db, {
+            tenantId,
+            kind: "alert",
+            title: `${adapter.name} did not accept the submission`,
+            body: `${opp.title}: ${safeError(result.detail, 300)}`,
+            link: `/applications?application=${app.id}`,
+            dedupeKey: `submit-rejected:${app.id}`,
+          });
+          ctx.summary = `Submission ${result.status}: ${result.detail}`;
+          return { status: "manual_required" as const, detail: result.detail };
+        }
+        submitted = { externalRef: result.externalRef ?? null };
+        await recordSubmitted(result.externalRef ?? null, ctx.runId);
+        await scheduleDemoAward();
+        ctx.summary = `Submitted to ${adapter.name}${result.externalRef ? ` (${result.externalRef})` : ""}`;
+        return { status: "submitted" as const, detail: result.detail, externalRef: result.externalRef };
+      },
+    );
+  } catch (err) {
+    if (submitted) {
+      // The marketplace accepted it; only the local write failed. Keep the proof so a retry finishes it.
+      await db
+        .update(idempotencyKey)
+        .set({ result: { status: "submitted", externalRef: (submitted as { externalRef: string | null }).externalRef } })
+        .where(eq(idempotencyKey.key, key))
+        .catch(() => {});
+      throw err;
+    }
+    if (!externalCallStarted) {
+      await releaseClaim();
+      // Non-retryable provider refusals (auth, validation, …) will not succeed on retry: tell the owner.
+      if (isProviderError(err) && !err.retryable) {
         await notify(db, {
           tenantId,
           kind: "alert",
           title: `${adapter.name} did not accept the submission`,
-          body: `${opp.title}: ${safeError(result.detail, 300)}`,
+          body: `${opp.title}: ${safeError(err.message, 300)}`,
           link: `/applications?application=${app.id}`,
           dedupeKey: `submit-rejected:${app.id}`,
         });
-        ctx.summary = `Submission ${result.status}: ${result.detail}`;
-        return { status: "manual_required" as const, detail: result.detail };
+        return { status: "manual_required", detail: safeError(err.message, 300) };
       }
-      const mode = adapter.key === "mock" ? "mock" : "api";
-      await db.transaction(async (tx) => {
-        // Same lock order as the claim (advisory lock → application row → idempotency row);
-        // without it a concurrent claim holding the row lock deadlocks against this update.
-        await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${key}))`);
-        await tx.execute(sql`select id from ${application} where id = ${app.id} for update`);
-        await tx.update(idempotencyKey).set({ result: { status: "submitted", externalRef: result.externalRef ?? null } }).where(eq(idempotencyKey.key, key));
-        await transition(tx, {
-          machine: "application",
-          id: app.id,
-          tenantId,
-          to: "submitted",
-          actor: { type: "agent", id: "client" },
-          reason: "owner-approved proposal submitted via official integration",
-          patch: { submittedAt: new Date(), submissionMode: mode, externalRef: result.externalRef ?? null },
-          event: {
-            type: "application.submitted",
-            level: "success",
-            agent: "client",
-            runId: ctx.runId,
-            subjectType: "application",
-            subjectId: app.id,
-            message: `Submitted ${quote(opp.title)} to ${adapter.name} at ${money(app.priceUsd ?? prop?.priceUsd ?? 0)}${mode === "mock" ? " (demo marketplace)" : ""}`,
-          },
-        });
-        if (opp.status === "pursuing") {
-          await transition(tx, { machine: "opportunity", id: opp.id, tenantId, to: "applied", actor: { type: "agent", id: "client" } });
-        }
-      });
-      if (adapter.key === "mock") {
-        // The demo client "reviews" the proposal and accepts after a short, deterministic delay.
-        const delay = 15 + (fnv(app.id) % 11);
-        await deps.queue.send(QUEUES.applicationAward, { tenantId, applicationId: app.id }, { singletonKey: app.id, startAfter: delay });
-      }
-      ctx.summary = `Submitted to ${adapter.name}${result.externalRef ? ` (${result.externalRef})` : ""}`;
-      return { status: "submitted" as const, detail: result.detail, externalRef: result.externalRef };
-    },
-  );
+      throw err; // retryable: pg-boss retries; the outbox sweeper re-enqueues if retries run out
+    }
+    await markAmbiguous(safeError(err, 300));
+    return { status: "ambiguous", detail: "submission outcome unknown; owner must verify" };
+  }
 }
 
 /** Demo marketplace only: the simulated client awards the job. */

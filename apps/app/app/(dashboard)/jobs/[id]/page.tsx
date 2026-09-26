@@ -6,12 +6,14 @@ import { BarMeter, Button, Callout, SectionHeader, StatusDot, cn, formatPct, for
 import type { JobState } from "@gigpilot/contracts";
 import { Dag, type DagRepair } from "@/components/dag/dag";
 import { JobActions } from "@/components/jobs/job-actions";
+import { JobBlockers } from "@/components/jobs/job-blockers";
+import { SpendLimitEditor } from "@/components/jobs/spend-limit-editor";
 import { ActivityStream } from "@/components/live/activity-stream";
 import { RelTime } from "@/components/rel-time";
 import { StateBadge } from "@/components/state-badge";
 import { fmtDate, isPast } from "@/lib/format";
 import { COST_CATEGORY_META, DELIVERY_META, JOB_META, RUN_META, SOURCE_SHORT, agentName } from "@/lib/labels";
-import { getJobDetail } from "@/lib/queries/jobs";
+import { getJobBlockers, getJobDetail } from "@/lib/queries/jobs";
 import { requireSession } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
@@ -31,6 +33,8 @@ export default async function JobPage({ params }: { params: Promise<{ id: string
   const ctx = await requireSession();
   const d = await getJobDetail(ctx.tenantId, id);
   if (!d) notFound();
+  const blockers = await getJobBlockers(ctx.tenantId, id);
+  const canManage = ctx.role === "owner" || ctx.role === "admin";
   const j = d.job;
   const meta = JOB_META[j.status as JobState];
   const spendPct = j.spendLimitUsd > 0 ? j.actualCostUsd / j.spendLimitUsd : 0;
@@ -113,8 +117,11 @@ export default async function JobPage({ params }: { params: Promise<{ id: string
           qaSummary={d.delivery?.manifest?.qaSummary ?? d.qas[0]?.summary ?? null}
           priceUsd={j.priceUsd}
           repairsLeft={Math.max(0, d.settings.limits.maxRepairsPerJob - j.repairCount)}
+          canRequestRevision={blockers.canRequestRevision}
         />
       </header>
+
+      <JobBlockers jobId={j.id} blockers={blockers} canManage={canManage} spendLimitUsd={j.spendLimitUsd} actualCostUsd={j.actualCostUsd} />
 
       {j.status === "awaiting_final_approval" && d.delivery?.status === "prepared" ? (
         <Callout tone="accent" icon={<CircleCheck />} title="Final delivery is ready for your review" className="mb-5">
@@ -134,7 +141,16 @@ export default async function JobPage({ params }: { params: Promise<{ id: string
           <dd className="mt-1.5">
             <BarMeter value={spendPct} tone={spendPct > 0.9 ? "risk" : spendPct > 0.7 ? "warn" : "neutral"} label="Spend against job limit" />
           </dd>
-          <dd className="mt-1 font-mono text-[11px] text-fg-3">limit {formatUsd(j.spendLimitUsd, { cents: true })}</dd>
+          <dd>
+            <SpendLimitEditor
+              jobId={j.id}
+              limitUsd={j.spendLimitUsd}
+              actualUsd={j.actualCostUsd}
+              ceilingUsd={blockers.spendCeilingUsd}
+              editable={canManage && !["delivered", "closed", "cancelled"].includes(j.status)}
+              highlight={blockers.budgetBlocked}
+            />
+          </dd>
         </div>
         <div className="bg-bg px-4 py-3">
           <dt className="text-xs text-fg-3">Estimated cost</dt>

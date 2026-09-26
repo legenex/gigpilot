@@ -1,6 +1,8 @@
 /**
  * DEV-ONLY fixture loader for designing the dashboard against realistic data.
- * Never imported by the app. Inserts rows for ONE tenant (found by user email).
+ * Never imported by the app, excluded from the Docker build context
+ * (.dockerignore) and refuses to run unless DATABASE_URL names a *_dev or
+ * *_test database. Inserts rows for ONE tenant (found by user email).
  *
  *   set -a; . ./.env; set +a
  *   apps/app/node_modules/.bin/tsx apps/app/scripts/dev-fixtures.ts --email you@example.com [--reset] [--live]
@@ -59,6 +61,20 @@ const arg = (name: string) => {
   return i >= 0 ? args[i + 1] : undefined;
 };
 const flag = (name: string) => args.includes(`--${name}`);
+
+// Hard guard: this script writes synthetic rows. It must never touch a production database.
+{
+  let dbName = "";
+  try {
+    dbName = new URL(process.env.DATABASE_URL ?? "").pathname.replace(/^\//, "");
+  } catch {
+    dbName = "";
+  }
+  if (process.env.NODE_ENV === "production" || !/_(dev|test)$/.test(dbName)) {
+    console.error("dev-fixtures.ts refuses to run: NODE_ENV=production or DATABASE_URL is not a *_dev / *_test database.");
+    process.exit(2);
+  }
+}
 
 const EMAIL = arg("email");
 if (!EMAIL) {

@@ -17,3 +17,4 @@ e2e/screenshots
 ops/gx10-01/*.env
 ops/vps/*.env
 **/scripts/screens*
+**/scripts/dev-fixtures*

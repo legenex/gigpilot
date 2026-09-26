@@ -1,6 +1,7 @@
 import "./testing/setup";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { and, auditEvent, closeDb, costLedgerEntry, eq, getDb, job, opportunity, workflowStep } from "@gigpilot/db";
+import { STEP_STUCK_MS } from "./agents/maintenance";
 import { approveFinalDelivery } from "./commands";
 import { handlers } from "./handlers";
 import { AUTOMATION_BRIEF, createTestTenant, drain, insertOpportunity, migrateTestDb, resetDb, testDeps, wonJob } from "./testing/harness";
@@ -54,8 +55,11 @@ describe("maintenance jobs", () => {
     await handlers["workflow-tick"]({ tenantId: t.tenantId, jobId }, deps);
     const dispatched = deps.queue.take("step-execute")[0]!;
     const stepId = (dispatched.payload as { stepId: string }).stepId;
-    // Simulate a worker that died mid-step 40 minutes ago.
+    // Not stuck yet while the queue job may still legitimately finish (expiry + grace).
     await db.update(workflowStep).set({ status: "running", attempts: 1, startedAt: new Date(Date.now() - 40 * 60_000) }).where(eq(workflowStep.id, stepId));
+    expect(((await handlers["job-monitor"]({}, deps)) as { stuckSteps: number }).stuckSteps).toBe(0);
+    // Simulate a worker that died mid-step well past the step's expiry + grace.
+    await db.update(workflowStep).set({ startedAt: new Date(Date.now() - STEP_STUCK_MS - 60_000) }).where(eq(workflowStep.id, stepId));
     const mon = (await handlers["job-monitor"]({}, deps)) as { stuckSteps: number };
     expect(mon.stuckSteps).toBe(1);
     const [s] = await db.select().from(workflowStep).where(eq(workflowStep.id, stepId));
