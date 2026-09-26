@@ -4,8 +4,9 @@
 
 ```
                     ┌──────────────── gx10-01 (Tailscale 100.105.214.61) ────────────────┐
- browser ──:4710──▶ │ web  (Next.js, marketing)  ── validates session cookie ──┐          │
- browser ──:4711──▶ │ app  (Next.js, dashboard + Better Auth + SSE + assets) ──┤          │
+ browser ─▶ Caddy edge (Tailscale IP :4710/:4711, rewrites X-Forwarded-For)          │
+            :4710 ▶ │ web  (Next.js, marketing)  ── validates session cookie ──┐          │
+            :4711 ▶ │ app  (Next.js, dashboard + Better Auth + SSE + assets) ──┤          │
                     │                               commands ─▶ pg-boss queues │          │
                     │ worker (pg-boss handlers + cron schedules + health :4712)│          │
                     │   ├─ agents: scout · analyst · economics · proposal ·    ▼          │
@@ -26,6 +27,12 @@
   reads the same session (shared secret + DB), so CTA state is rendered server-side.
 - **Worker** is the only process that talks to model/creative/marketplace providers
   (the app only runs zero-cost connection tests).
+- **Edge**: a Caddy container on host networking binds only the Tailscale IP and proxies to
+  the loopback-published containers; it overwrites `X-Forwarded-For`, so per-IP auth limits
+  are trustworthy. Containers never publish on the Tailscale or LAN addresses directly.
+- **Database roles**: migrations run as the owner role; web/app/worker connect as the
+  non-superuser `gigpilot_app` (data access on app tables, owner of the pg-boss schema only,
+  statement/lock/idle-transaction timeouts).
 
 ## Packages
 
@@ -43,11 +50,16 @@
 ## Core flows
 
 **Sourcing → recommendation.** Scheduler fans out `source-refresh` per tenant × enabled
-source (respecting `backgroundPollingAllowed` / `minPollIntervalMinutes`). Scout normalises,
-matches a service family, dedupes (hash + shingle/token Jaccard) and inserts. Analyst
-produces a schema-validated `OpportunityAnalysis` (GX locally; mock fallback). Economics
-prices quantities from the catalog with tenant settings, scores gates (profit ≥ min, margin
-≥ min hard; budget soft; incomplete never "pursue"), and shortlists pursue-worthy work.
+source (respecting `backgroundPollingAllowed` / `minPollIntervalMinutes`; demo sourcing only
+for workspaces active in the last 7 days; per-market allocation weights the batch). Scout
+normalises, matches a service family, dedupes (hash + shingle/token Jaccard) and inserts.
+**Two-tier analysis:** every brief is triaged instantly by a deterministic analyser and
+priced by the economics engine (so the radar fills immediately), but triage alone never
+recommends "pursue". The best candidates (capped per tenant per hour) are refined by the
+model router (local GX first) on a dedicated single-slot queue; only a successful
+refinement promotes a brief to "pursue" and the shortlist. Economics prices quantities
+with the routes that will actually run, scores gates (profit ≥ min, margin ≥ min hard;
+budget soft; fit/confidence configurable; incomplete never "pursue").
 
 **Pursuit → commitment.** Owner approves pursuit → Proposal Agent drafts (specific scope,
 price rule, assumptions, questions) → owner approves proposal/price/scope (commercial gate)
@@ -68,10 +80,21 @@ Every status change goes through `transition()` → validated against the machin
 optionally streamed to `agent_event` (live activity). Retries create new `agent_run` rows;
 failed runs, generations and QA reviews are never overwritten.
 
+## Shared local inference
+
+gx-code has one llama.cpp slot per node (two cluster-wide) and is shared with AgentOS, so
+GigPilot uses at most one concurrent heavy request (`GX_CODE_MAX_CONCURRENCY`), served by
+priority: production/QA/recovery → market research → background refinement. A router
+circuit breaker opens after consecutive GX failures; per-tenant daily heavy-call quotas
+and refinement caps protect the cluster from sign-up floods.
+
 ## Safety
 
 - Paid providers require `PAID_PROVIDER_DAILY_BUDGET_USD` > 0 **and** tenant
-  `dailyPaidSpendLimitUsd` > 0 and remaining daily/job budget; defaults are 0 (mock mode).
+  `dailyPaidSpendLimitUsd` > 0 (clamped to an operator ceiling) and remaining daily/job
+  budget, reserved under a lock before each paid call; defaults are 0 (mock mode).
+- Server-wide provider credentials are available only to operator workspaces
+  (`OPERATOR_EMAILS`); everyone else stores encrypted, AAD-bound per-workspace keys.
 - Per-job spend limit, max step attempts, max repairs per job, max generations per step.
 - Idempotency keys + unique indexes on applications, generations, notifications, and the
   `idempotency_key` table for side effects.
@@ -83,4 +106,6 @@ failed runs, generations and QA reviews are never overwritten.
 
 Structured JSON logs (pino in the worker), `agent_run` + `agent_event` + `audit_event`
 history, provider health rows, health endpoints (`/api/health` on web/app, `/healthz` +
-`/readyz` on the worker), supervision snapshot for AgentOS.
+`/readyz` on the worker — readiness checks DB, queue, migrations, schedule freshness),
+token-protected supervision API + status snapshot for AgentOS, a host watchdog that
+restarts unhealthy containers and writes `status/alerts.log`.
