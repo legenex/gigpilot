@@ -18,7 +18,7 @@
 
   --gp-fg: #edeef0;
   --gp-fg-2: #a1a6ae;
-  --gp-fg-3: #676c75;
+  --gp-fg-3: #80858e;
   --gp-fg-4: #454951;
 
   --gp-accent: #ff6b2c;
@@ -37,6 +37,15 @@
   --gp-info-wash: rgba(122, 167, 255, 0.12);
   --gp-violet: #a493ff;
   --gp-cyan: #56cfe1;
+
+  /* Chart series (categorical, fixed order). Validated for the dark surface
+     with the dataviz palette checks: lightness band, chroma floor, adjacent
+     CVD separation >= 8, normal-vision >= 15, contrast >= 3:1. Status colours
+     (profit/warn/risk) are never reused as series. */
+  --gp-series-1: #3987e5;
+  --gp-series-2: #d55181;
+  --gp-series-3: #9085e9;
+  --gp-series-4: #199e70;
 
   --gp-r-xs: 4px;
   --gp-r-sm: 6px;
@@ -83,6 +92,10 @@
   --color-info-wash: var(--gp-info-wash);
   --color-violet: var(--gp-violet);
   --color-cyan: var(--gp-cyan);
+  --color-series-1: var(--gp-series-1);
+  --color-series-2: var(--gp-series-2);
+  --color-series-3: var(--gp-series-3);
+  --color-series-4: var(--gp-series-4);
 
   --font-sans: var(--font-inter), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-display: var(--font-schibsted), var(--font-inter), ui-sans-serif, system-ui, sans-serif;
@@ -112,6 +125,66 @@
   --animate-pulse-dot: gp-pulse-dot 1.8s var(--gp-ease-in-out) infinite;
   --animate-shimmer: gp-shimmer 1.6s linear infinite;
   --animate-fade-up: gp-fade-up var(--gp-dur-3) var(--gp-ease-out) both;
+  --animate-overlay-in: gp-fade-in var(--gp-dur-2) var(--gp-ease-out) both;
+  --animate-overlay-out: gp-fade-out var(--gp-dur-1) var(--gp-ease-in-out) both;
+  --animate-dialog-in: gp-dialog-in var(--gp-dur-2) var(--gp-ease-out) both;
+  --animate-dialog-out: gp-dialog-out var(--gp-dur-1) var(--gp-ease-in-out) both;
+  --animate-sheet-right-in: gp-sheet-right-in var(--gp-dur-3) var(--gp-ease-out) both;
+  --animate-sheet-right-out: gp-sheet-right-out var(--gp-dur-2) var(--gp-ease-in-out) both;
+  --animate-sheet-left-in: gp-sheet-left-in var(--gp-dur-3) var(--gp-ease-out) both;
+  --animate-sheet-left-out: gp-sheet-left-out var(--gp-dur-2) var(--gp-ease-in-out) both;
+  --animate-sheet-bottom-in: gp-sheet-bottom-in var(--gp-dur-3) var(--gp-ease-out) both;
+  --animate-sheet-bottom-out: gp-sheet-bottom-out var(--gp-dur-2) var(--gp-ease-in-out) both;
+  --animate-pop-in: gp-pop-in var(--gp-dur-1) var(--gp-ease-out) both;
+  --animate-flow: gp-flow 1.2s linear infinite;
+}
+
+@keyframes gp-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes gp-fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+@keyframes gp-dialog-in {
+  from { opacity: 0; transform: translate(-50%, -48%) scale(0.98); }
+  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+@keyframes gp-dialog-out {
+  from { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  to { opacity: 0; transform: translate(-50%, -49%) scale(0.99); }
+}
+@keyframes gp-sheet-right-in {
+  from { transform: translateX(24px); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}
+@keyframes gp-sheet-right-out {
+  from { transform: none; opacity: 1; }
+  to { transform: translateX(24px); opacity: 0; }
+}
+@keyframes gp-sheet-left-in {
+  from { transform: translateX(-24px); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}
+@keyframes gp-sheet-left-out {
+  from { transform: none; opacity: 1; }
+  to { transform: translateX(-24px); opacity: 0; }
+}
+@keyframes gp-sheet-bottom-in {
+  from { transform: translateY(24px); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}
+@keyframes gp-sheet-bottom-out {
+  from { transform: none; opacity: 1; }
+  to { transform: translateY(24px); opacity: 0; }
+}
+@keyframes gp-pop-in {
+  from { opacity: 0; transform: translateY(-2px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes gp-flow {
+  to { stroke-dashoffset: -16; }
 }
 
 @keyframes gp-pulse-dot {

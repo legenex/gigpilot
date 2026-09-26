@@ -24,7 +24,7 @@ the site persuades, the cockpit operates.
 | `--gp-bg-raised` | `#0C0D10` | app chrome, sidebars |
 | `--gp-surface-1/2/3` | `#111317 / #16181D / #1C1F25` | panels, hovers, pressed |
 | `--gp-line` / `--gp-line-strong` | `rgba(255,255,255,.07) / .12` | hairlines — prefer lines over boxes |
-| `--gp-fg` / `--gp-fg-2` / `--gp-fg-3` | `#EDEEF0 / #A1A6AE / #676C75` | text hierarchy |
+| `--gp-fg` / `--gp-fg-2` / `--gp-fg-3` | `#EDEEF0 / #A1A6AE / #80858E` | text hierarchy (fg-3 ≥ 4.5:1 on graphite) |
 | `--gp-accent` | `#FF6B2C` | signal (international orange) |
 | `--gp-profit` | `#3FD68C` | profit, pass, healthy |
 | `--gp-warn` | `#F2B84B` | caution, degraded |

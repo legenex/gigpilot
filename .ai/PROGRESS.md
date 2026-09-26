@@ -27,3 +27,6 @@
 - Integrations specialist finished (158 tests; live GX 12/12 valid analyses); committed f0e45af with ops/docs/e2e.
 - ~02:50 SAST: agent-system, dashboard and marketing specialists hit an API session limit
   (reset 05:50). Resumed all three at 19:52 SAST from their transcripts; work on disk intact.
+- Marketing site finished and committed (a4c8d55). Agent system finished; fixed a submission deadlock,
+  added budget-priority analysis and idle-workspace GX safeguards, un-ignored the storage module;
+  committed 352701d. Remaining specialist: dashboard.

@@ -1,3 +1,62 @@
 @import "tailwindcss";
 @import "@gigpilot/ui/theme.css";
 @source "../../../packages/ui/src";
+
+/*
+ * Dashboard-only refinements. DESIGN.md's fg-3 (#676C75) measures ~3.8:1 on
+ * graphite; the cockpit uses small tertiary text heavily, so it is lifted to
+ * clear WCAG AA 4.5:1 on bg and surface-2.
+ */
+:root {
+  --gp-fg-3: #80858e;
+}
+
+@layer base {
+  body {
+    font-size: 13px;
+    line-height: 20px;
+  }
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+  }
+  input[type="number"] {
+    -moz-appearance: textfield;
+    appearance: textfield;
+  }
+  input[type="number"]::-webkit-outer-spin-button,
+  input[type="number"]::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+}
+
+@layer utilities {
+  .page {
+    margin-inline: auto;
+    width: 100%;
+    max-width: 1640px;
+    padding: 20px 16px 48px;
+  }
+  @media (min-width: 768px) {
+    .page {
+      padding: 22px 24px 56px;
+    }
+  }
+  @media (min-width: 1280px) {
+    .page {
+      padding: 24px 32px 64px;
+    }
+  }
+  .num {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum", "cv11";
+  }
+  .scrollbar-none {
+    scrollbar-width: none;
+  }
+  .scrollbar-none::-webkit-scrollbar {
+    display: none;
+  }
+}

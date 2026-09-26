@@ -16,6 +16,9 @@ const nextConfig: NextConfig = {
   outputFileTracingRoot: root,
   turbopack: { root },
   poweredByHeader: false,
+  // The repo root AGENTS.md is canonical; don't let `next dev` generate per-app copies.
+  agentRules: false,
+  devIndicators: { position: "bottom-right" },
   serverExternalPackages: ["pg-boss", "postgres"],
   async headers() {
     return [{ source: "/:path*", headers: securityHeaders }];
