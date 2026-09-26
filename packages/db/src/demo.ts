@@ -553,7 +553,8 @@ export async function seedDemoHistory(db: Executor, tenantId: string): Promise<v
     const jobId = randomUUID();
     const wfId = randomUUID();
     const b = econ.breakdown;
-    const estimatedCostUsd = r4(b.fulfilmentCostUsd + b.revisionContingencyUsd + b.contingencyUsd);
+    const estimatedCostUsd = r4(b.fulfilmentCostUsd);
+    const bufferedCostUsd = r4(b.fulfilmentCostUsd + b.revisionContingencyUsd + b.contingencyUsd);
     const creativeActual = h.creative.reduce((a, c) => a + c.generations * c.unitCostUsd, 0);
     const inferenceActual = r4(h.inference.estUsd * h.inference.actualFactor);
     const actualCostUsd = r4(creativeActual + inferenceActual);
@@ -572,7 +573,7 @@ export async function seedDemoHistory(db: Executor, tenantId: string): Promise<v
       serviceFamily: h.family,
       status: h.status,
       priceUsd: h.price,
-      spendLimitUsd: Math.min(s.limits.perJobSpendLimitUsd, Math.max(estimatedCostUsd * 2.5, 10)),
+      spendLimitUsd: Math.min(s.limits.perJobSpendLimitUsd, Math.max(bufferedCostUsd * 2.5, 10)),
       estimatedCostUsd,
       actualCostUsd,
       repairCount: h.repaired ? 1 : 0,

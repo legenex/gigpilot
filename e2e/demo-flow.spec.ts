@@ -31,7 +31,7 @@ test("opportunity → proposal → job → QA fail → repair → approval → d
   await page.waitForURL((u) => u.origin === new URL(APP_URL).origin);
 
   // 7–8. Radar fills from the demo marketplace via the worker pipeline; find a pursue-worthy one
-  const pursueRows = page.locator('[data-testid="radar-row"][data-recommendation="pursue"]');
+  const pursueRows = page.locator('[data-testid="radar-row"][data-recommendation="pursue"]:is([data-status="shortlisted"], [data-status="analysed"])');
   await pollPage(page, `${APP_URL}/radar`, async () => (await pursueRows.count()) > 0, 180_000);
   expect(await page.getByTestId("radar-row").count()).toBeGreaterThan(5);
   const oppId = await pursueRows.first().getAttribute("data-opportunity-id");

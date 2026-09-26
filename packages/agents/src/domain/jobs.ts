@@ -95,7 +95,10 @@ export async function createJobFromApplication(
       ].slice(0, 16)
     : [];
   const priceUsd = prop?.priceUsd ?? app.priceUsd ?? opp.priceUsd ?? 0;
-  const estimatedCostUsd = estimate?.breakdown
+  // Expected production spend (the forecast the ±20% accuracy goal is measured against).
+  // Revision contingency and general contingency are buffers, reflected in the spend limit instead.
+  const estimatedCostUsd = estimate?.breakdown ? estimate.breakdown.fulfilmentCostUsd : 0;
+  const bufferedCostUsd = estimate?.breakdown
     ? estimate.breakdown.fulfilmentCostUsd + estimate.breakdown.revisionContingencyUsd + estimate.breakdown.contingencyUsd
     : 0;
   const dueAt = prop?.timelineDays ? new Date(Date.now() + prop.timelineDays * 86_400_000) : opp.deadlineAt;
@@ -111,7 +114,7 @@ export async function createJobFromApplication(
       serviceFamily: analysis?.serviceFamily ?? opp.marketKey ?? "research-content",
       status: "intake",
       priceUsd,
-      spendLimitUsd: Math.min(settings.limits.perJobSpendLimitUsd, Math.max(estimatedCostUsd * 2.5, 10)),
+      spendLimitUsd: Math.min(settings.limits.perJobSpendLimitUsd, Math.max(bufferedCostUsd * 2.5, 10)),
       estimatedCostUsd,
       acceptanceCriteria: acceptance,
       brief: analysis?.summary ?? opp.description.slice(0, 2000),
