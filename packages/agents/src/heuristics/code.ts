@@ -352,7 +352,7 @@ const FEATURE_SCAFFOLD: Record<string, { path: string; content: string }> = {
 };
 
 /** Add a real (if minimal) module for every requested feature the artifact lacks evidence for. */
-function scaffoldRequestedFeatures(family: string, brief: string, files: ArtifactFile[]): void {
+export function scaffoldRequestedFeatures(family: string, brief: string, files: ArtifactFile[]): void {
   const requested = detectRequestedFeatures(brief, family);
   if (!requested.length) return;
   const missing = featureCoverage(requested, files).missing;

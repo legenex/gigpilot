@@ -567,7 +567,18 @@ export async function runQaStep(ctx: RunContext, j: JobRow, qaStep: StepRow, all
     // review heavy (gx-code) output with the fast model and vice versa.
     const task: IntelligenceTask =
       producerFamily === "gx" ? (producer.model === env().GX_MODEL_FAST ? "qa_high" : "qa_basic") : ["code", "test", "copy"].includes(s.kind) ? "qa_high" : "qa_basic";
-    const criteria = [...new Set([...s.acceptance, ...(s.kind === "code" || s.kind === "test" ? criteriaBase : j.acceptanceCriteria)])];
+    // Judge each step against ITS OWN criteria; only code/test steps are also held to
+    // the job-level criteria + requested features (a research step must not be failed
+    // for not implementing the app's billing).
+    const criteria = [
+      ...new Set(
+        s.kind === "code" || s.kind === "test"
+          ? [...s.acceptance, ...criteriaBase]
+          : s.acceptance.length
+            ? s.acceptance
+            : j.acceptanceCriteria,
+      ),
+    ];
     const excerpt =
       check.artifact !== undefined
         ? `Files (${check.artifact.files.length}): ${check.artifact.files.join(", ")}\n${check.artifact.excerpt}`
@@ -588,7 +599,10 @@ export async function runQaStep(ctx: RunContext, j: JobRow, qaStep: StepRow, all
             content:
               "You are GigPilot's QA evaluator. Judge the work strictly against EACH acceptance criterion using the artifact shown (file list and contents). " +
               "For every criterion or requested feature with no evidence in the artifact, add a MAJOR finding with code \"missing_feature\". " +
-              "Do not repeat the deterministic findings listed. Tests cannot be executed in this environment — never claim they passed. " +
+              "Do not repeat the deterministic findings listed, and do NOT report a requested feature as missing when it appears in the deterministic verification list " +
+              "(that list is evidence from keyword/structure checks on the source files). " +
+              "Only judge criteria that are relevant to THIS step (its acceptance criteria and the requested features) — do not demand deliverables that belong to other steps. " +
+              "Tests cannot be executed in this environment — never claim they passed. " +
               "Return JSON qa_verdict {verdict, score 0..1, findings[{code, severity, message, criterion?, repairHint?}], summary}. Be concise and factual.",
           },
           {
@@ -596,6 +610,8 @@ export async function runQaStep(ctx: RunContext, j: JobRow, qaStep: StepRow, all
             content: [
               `Step: ${s.name} (${s.kind})`,
               `Deterministic checks: ${check.findings.length ? check.findings.map((f) => `[${f.severity}] ${f.code}: ${f.message}`).join("; ") : "no findings"} (${check.evidence.slice(0, 6).join(", ")})`,
+              `Deterministic verification (do NOT report these as missing): ${check.verified?.length ? check.verified.join("; ") : "none"}`,
+              check.notVerified?.length ? `Cannot be verified here (list, do not fail): ${check.notVerified.join("; ")}` : "",
               wrapUntrusted("job and acceptance criteria", `Job: ${j.title}\nBrief: ${truncate(qa.brief, 1200)}\nAcceptance criteria (check each):\n${criteria.map((c) => `- ${c}`).join("\n") || "- as briefed"}`),
               `Artifact under review:\n${wrapUntrusted("artifact", excerpt)}`,
             ].join("\n"),

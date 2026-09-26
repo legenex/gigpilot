@@ -5,7 +5,7 @@ import { AGENTS, InvalidTransitionError, QUEUES, type AgentKey, type Capability,
 import { and, asset, client, ConcurrentTransitionError, desc, emitEvent, eq, getDb, inArray, job, opportunityAnalysis, transition, workflowStep, type TransitionInput } from "@gigpilot/db";
 import { isProviderError, neutraliseDelimiters, wrapUntrusted } from "@gigpilot/providers";
 import { storageOf, type AgentDeps } from "../deps";
-import { codeArtifactSchema, generateAutomationArtifact, generateWebArtifact, type CodeArtifact } from "../heuristics/code";
+import { codeArtifactSchema, generateAutomationArtifact, generateWebArtifact, scaffoldRequestedFeatures, type CodeArtifact } from "../heuristics/code";
 import { buildConcepts, buildSrt, generateDocument, langCode, productPhrase, type Concept, type ContentContext } from "../heuristics/content";
 import { isQaStep } from "../heuristics/workflows";
 import { notify } from "../lib/notify";
@@ -449,6 +449,10 @@ async function executeCode(ctx: RunContext, j: JobRow, step: StepRow, _all: Step
     { avoidFamilies: repair?.avoidFamilies },
   );
   const art: CodeArtifact = res.data ?? deterministic;
+  // Whatever produced the artifact (model or deterministic generator), make sure every
+  // feature the brief names is at least present in the delivered source. Scaffolds are
+  // clearly marked as generated and un-executed; real files are never overwritten.
+  scaffoldRequestedFeatures(j.serviceFamily === "web-app-builds" ? "web-app-builds" : "ai-automation", codeBrief, art.files);
   if (defect === "failing_test" && art.testReport.failed === 0 && art.testReport.tests.length > 0) {
     const t = art.testReport.tests[art.testReport.tests.length - 1]!;
     t.status = "failed";
