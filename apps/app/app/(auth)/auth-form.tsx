@@ -27,9 +27,6 @@ function friendly(mode: "login" | "signup", err: { status?: number; message?: st
 export function AuthForm({ mode, next }: { mode: "login" | "signup"; next?: string }) {
   const id = useId();
   const router = useRouter();
-  const [name, setName] = useState("");
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
   const [show, setShow] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -42,7 +39,9 @@ export function AuthForm({ mode, next }: { mode: "login" | "signup"; next?: stri
     () => false,
   );
 
-  const validate = () => {
+  // Inputs are uncontrolled (read from FormData on submit) so anything typed
+  // before hydration survives — controlled inputs would be reset to "".
+  const validate = (name: string, email: string, password: string) => {
     const e: Record<string, string> = {};
     if (mode === "signup" && name.trim().length < 2) e.name = "Tell us your name.";
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) e.email = "Enter a valid email address.";
@@ -51,10 +50,14 @@ export function AuthForm({ mode, next }: { mode: "login" | "signup"; next?: stri
     return Object.keys(e).length === 0;
   };
 
-  const submit = async (ev: React.FormEvent) => {
+  const submit = async (ev: React.FormEvent<HTMLFormElement>) => {
     ev.preventDefault();
     setError(null);
-    if (!validate()) return;
+    const form = new FormData(ev.currentTarget);
+    const name = String(form.get("name") ?? "");
+    const email = String(form.get("email") ?? "");
+    const password = String(form.get("password") ?? "");
+    if (!validate(name, email, password)) return;
     setPending(true);
     try {
       const res =
@@ -92,9 +95,8 @@ export function AuthForm({ mode, next }: { mode: "login" | "signup"; next?: stri
           <Field id={`${id}-name`} label="Name" error={fieldErrors.name}>
             <Input
               id={`${id}-name`}
+              name="name"
               autoComplete="name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
               aria-invalid={!!fieldErrors.name}
               data-testid="signup-name"
               className="h-9"
@@ -108,8 +110,7 @@ export function AuthForm({ mode, next }: { mode: "login" | "signup"; next?: stri
             type="email"
             autoComplete="email"
             inputMode="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
+            name="email"
             aria-invalid={!!fieldErrors.email}
             data-testid={mode === "login" ? "login-email" : "signup-email"}
             className="h-9"
@@ -121,9 +122,8 @@ export function AuthForm({ mode, next }: { mode: "login" | "signup"; next?: stri
             <Input
               id={`${id}-password`}
               type={show ? "text" : "password"}
+              name="password"
               autoComplete={mode === "login" ? "current-password" : "new-password"}
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
               aria-invalid={!!fieldErrors.password}
               data-testid={mode === "login" ? "login-password" : "signup-password"}
               className="h-9 pr-9"

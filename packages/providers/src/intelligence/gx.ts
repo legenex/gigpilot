@@ -44,6 +44,12 @@ type FormatLevel = "json_schema" | "json_object" | "none";
 const formatSupport = new Map<string, FormatLevel>();
 
 const slots = new Semaphore(() => setting("GX_MAX_CONCURRENCY"));
+/**
+ * gx-code runs one llama.cpp slot per node (2 cluster-wide) and is shared with
+ * AgentOS and other GX clients — GigPilot takes at most GX_CODE_MAX_CONCURRENCY
+ * (default 1) of them so other workloads are never starved.
+ */
+const heavySlots = new Semaphore(() => setting("GX_CODE_MAX_CONCURRENCY"));
 
 export interface GxOptions {
   tenantId?: string | null;
@@ -173,9 +179,20 @@ export class GxProvider implements IntelligenceProvider {
       if (level === "json_schema" && p.jsonSchema) body.response_format = { type: "json_schema", json_schema: { name: p.schemaName, schema: p.jsonSchema, strict: true } };
       else if (level === "json_object") body.response_format = { type: "json_object" };
 
-      const release = await slots.acquire(p.signal).catch(() => {
+      const heavy = p.model !== setting("GX_MODEL_FAST");
+      const releaseHeavy = heavy
+        ? await heavySlots.acquire(p.signal).catch(() => {
+            throw new ProviderError("gx", "timeout", "aborted while waiting for a gx-code slot");
+          })
+        : () => {};
+      const releaseSlot = await slots.acquire(p.signal).catch(() => {
+        releaseHeavy();
         throw new ProviderError("gx", "timeout", "aborted while waiting for a GX slot");
       });
+      const release = () => {
+        releaseSlot();
+        releaseHeavy();
+      };
       let res;
       try {
         res = await safeFetch(

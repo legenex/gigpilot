@@ -1,6 +1,6 @@
 import { QUEUES, type QueueName, type QueuePayloads } from "@gigpilot/contracts";
 import type { AgentDeps } from "./deps";
-import { runOpportunityAnalyse } from "./agents/analyst";
+import { runOpportunityAnalyse, runOpportunityRefine } from "./agents/analyst";
 import { runApplicationAward, runApplicationSubmit } from "./agents/applications";
 import { runDeliveryPrepare } from "./agents/delivery";
 import { runStepExecute } from "./agents/execution";
@@ -27,6 +27,7 @@ export const handlers: QueueHandlers = {
   [QUEUES.sourceRefresh]: runSourceRefresh,
   [QUEUES.sourceRefreshAll]: (_p, deps) => runSourceRefreshAll(deps),
   [QUEUES.opportunityAnalyse]: runOpportunityAnalyse,
+  [QUEUES.opportunityRefine]: runOpportunityRefine,
   [QUEUES.opportunityExpire]: (_p, deps) => runOpportunityExpire(deps),
   [QUEUES.proposalGenerate]: runProposalGenerate,
   [QUEUES.applicationSubmit]: runApplicationSubmit,

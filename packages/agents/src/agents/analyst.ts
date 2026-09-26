@@ -14,6 +14,7 @@ import {
   eq,
   getDb,
   getTenantSettings,
+  inArray,
   market,
   opportunity,
   opportunityAnalysis,
@@ -170,6 +171,7 @@ export function computeEconomics(
 export async function runOpportunityAnalyse(payload: QueuePayloads["opportunity-analyse"], deps: AgentDeps) {
   const db = getDb();
   const { tenantId, opportunityId } = payload;
+  if (payload.refine) return runOpportunityRefine({ tenantId, opportunityId }, deps);
   const [opp] = await db.select().from(opportunity).where(and(eq(opportunity.id, opportunityId), eq(opportunity.tenantId, tenantId))).limit(1);
   if (!opp) return { status: "skipped" as const, reason: "not found" };
   const reanalysable = ["analysed", "shortlisted", "rejected"];
@@ -187,32 +189,13 @@ export async function runOpportunityAnalyse(payload: QueuePayloads["opportunity-
     return await runAgent(
       { deps, tenantId, agent: "analyst", task: "analyse_opportunity", subjectType: "opportunity", subjectId: opp.id, label: `Analysis of ${quote(opp.title)}` },
       async (ctx) => {
-        const markets = await db.select({ key: market.key, enabled: market.enabled, keywords: market.keywords }).from(market).where(eq(market.tenantId, tenantId));
-        const baseline = analyseOpportunityHeuristically(
-          {
-            title: opp.title,
-            description: opp.description,
-            skills: opp.skills,
-            sourceKey: opp.sourceKey,
-            budgetType: opp.budgetType,
-            budgetMinUsd: opp.budgetMinUsd,
-            budgetMaxUsd: opp.budgetMaxUsd,
-            deadlineAt: opp.deadlineAt,
-            postedAt: opp.postedAt,
-            clientName: opp.clientName,
-            clientRating: opp.clientRating,
-            clientSpendUsd: opp.clientSpendUsd,
-            proposalsCount: opp.proposalsCount,
-            marketKey: opp.marketKey,
-          },
-          { markets, preferredMinBudgetUsd: settings.thresholds.preferredMinBudgetUsd, now: deps.now() },
-        );
-        // Two-tier analysis: an instant deterministic triage priced by the same economics
-        // engine; deep model analysis (local GX, ~30–60 s) only when the brief could be worth
-        // pursuing, or when the owner explicitly asks for a re-analysis.
+        const { markets, baseline } = await baselineFor(opp, settings, deps);
+        // Two-tier analysis: every brief gets an instant deterministic triage priced by the
+        // same economics engine, so the radar fills immediately. Pursue candidates are then
+        // refined by local GX in a separate job (runOpportunityRefine) without blocking the
+        // owner; an owner-requested re-analysis goes straight to the model.
         const metrics = await tenantMetrics(db, tenantId);
-        const triage = computeEconomics(baseline, opp, settings, metrics);
-        const deep = Boolean(payload.force) || triage.score.recommendation !== "skip";
+        const deep = Boolean(payload.force);
         let provider = "heuristic";
         let model = "deterministic-triage";
         let analysis = baseline;
@@ -345,6 +328,10 @@ export async function runOpportunityAnalyse(payload: QueuePayloads["opportunity-
         });
         ctx.summary = message;
 
+        if (!deep && score.recommendation === "pursue") {
+          await deps.queue.send(QUEUES.opportunityRefine, { tenantId, opportunityId: opp.id }, { singletonKey: opp.id });
+        }
+
         if (score.recommendation === "pursue" && !settings.autonomy.requireOpportunityApproval) {
           await transition(db, { machine: "opportunity", id: opp.id, tenantId, to: "pursuing", actor: { type: "system", id: "autonomy" }, reason: "opportunity approval not required by tenant autonomy settings" });
           await deps.queue.send(QUEUES.proposalGenerate, { tenantId, opportunityId: opp.id }, { singletonKey: opp.id });
@@ -357,4 +344,140 @@ export async function runOpportunityAnalyse(payload: QueuePayloads["opportunity-
     await transition(db, { machine: "opportunity", id: opp.id, tenantId, to: "new", actor, reason: `analysis failed: ${safeError(err, 200)}` }).catch(() => {});
     throw err;
   }
+}
+
+
+async function baselineFor(opp: typeof opportunity.$inferSelect, settings: Awaited<ReturnType<typeof getTenantSettings>>, deps: AgentDeps) {
+  const db = getDb();
+  const markets = await db
+    .select({ key: market.key, enabled: market.enabled, keywords: market.keywords })
+    .from(market)
+    .where(eq(market.tenantId, opp.tenantId));
+  const baseline = analyseOpportunityHeuristically(
+    {
+      title: opp.title,
+      description: opp.description,
+      skills: opp.skills,
+      sourceKey: opp.sourceKey,
+      budgetType: opp.budgetType,
+      budgetMinUsd: opp.budgetMinUsd,
+      budgetMaxUsd: opp.budgetMaxUsd,
+      deadlineAt: opp.deadlineAt,
+      postedAt: opp.postedAt,
+      clientName: opp.clientName,
+      clientRating: opp.clientRating,
+      clientSpendUsd: opp.clientSpendUsd,
+      proposalsCount: opp.proposalsCount,
+      marketKey: opp.marketKey,
+    },
+    { markets, preferredMinBudgetUsd: settings.thresholds.preferredMinBudgetUsd, now: deps.now() },
+  );
+  return { markets, baseline };
+}
+
+/**
+ * Deep refinement of a triaged pursue candidate with the model router (local
+ * GX first). Adds a new analysis version and re-prices it; never flips the
+ * opportunity out of its current state (so it cannot race owner actions) —
+ * it only shortlists an `analysed` brief that the refined numbers now clear.
+ */
+export async function runOpportunityRefine(payload: QueuePayloads["opportunity-refine"], deps: AgentDeps) {
+  const db = getDb();
+  const { tenantId, opportunityId } = payload;
+  const [opp] = await db.select().from(opportunity).where(and(eq(opportunity.id, opportunityId), eq(opportunity.tenantId, tenantId))).limit(1);
+  if (!opp) return { status: "skipped" as const, reason: "not found" };
+  if (!["analysed", "shortlisted"].includes(opp.status)) return { status: "skipped" as const, reason: `opportunity is ${opp.status}` };
+  const settings = await getTenantSettings(db, tenantId);
+  const actor = { type: "agent" as const, id: "analyst" };
+
+  return runAgent(
+    { deps, tenantId, agent: "analyst", task: "analyse_opportunity.refine", subjectType: "opportunity", subjectId: opp.id, label: `Deep analysis of ${quote(opp.title)}` },
+    async (ctx) => {
+      const { markets, baseline } = await baselineFor(opp, settings, deps);
+      const res = await callIntelligence(
+        ctx,
+        {
+          task: "analyse_opportunity",
+          messages: analysisPrompt(opp, baseline),
+          schema: opportunityAnalysisSchema,
+          schemaName: "opportunity_analysis",
+          maxOutputTokens: 2500,
+          temperature: 0.2,
+          mockResult: () => baseline,
+        },
+        { opportunityId: opp.id },
+      );
+      if (res.family === "mock") {
+        ctx.summary = "No model available — triage analysis stands";
+        return { status: "unchanged" as const };
+      }
+      const analysis = sanitiseAnalysis(res.data ?? baseline, baseline);
+      const [latest] = await db
+        .select({ version: opportunityAnalysis.version })
+        .from(opportunityAnalysis)
+        .where(eq(opportunityAnalysis.opportunityId, opp.id))
+        .orderBy(desc(opportunityAnalysis.version))
+        .limit(1);
+      const [analysisRow] = await db
+        .insert(opportunityAnalysis)
+        .values({ tenantId, opportunityId: opp.id, version: (latest?.version ?? 0) + 1, analysis, provider: res.family, model: res.model, agentRunId: ctx.runId })
+        .returning({ id: opportunityAnalysis.id });
+      if (!analysisRow) throw new Error("analysis insert failed");
+      const metrics = await tenantMetrics(db, tenantId);
+      const { economics, score } = computeEconomics(analysis, opp, settings, metrics);
+      const estimateId = await persistEstimate(db, { tenantId, opportunityId: opp.id, analysisId: analysisRow.id, economics });
+      await db.insert(opportunityScore).values({
+        tenantId,
+        opportunityId: opp.id,
+        analysisId: analysisRow.id,
+        costEstimateId: estimateId,
+        fit: analysis.fitScore,
+        complexity: analysis.complexity,
+        revisionRisk: analysis.revisionRisk,
+        deadlineRisk: analysis.deadlineRisk,
+        confidence: analysis.confidence,
+        overall: score.overall,
+        recommendation: score.recommendation,
+        gates: score.gates,
+        reasons: score.reasons,
+      });
+      const marketKeys = new Set(markets.map((m) => m.key));
+      const message = `Refined ${quote(opp.title)} with ${res.family}/${res.model} — ${money(economics.grossProfitUsd)} expected profit, ${pct(economics.grossMargin)} margin → ${score.recommendation}`;
+      await db.transaction(async (tx) => {
+        // Only still-open briefs are re-priced; an owner action in the meantime wins.
+        const updated = await tx
+          .update(opportunity)
+          .set({
+            expectedProfitUsd: economics.grossProfitUsd,
+            expectedMargin: economics.grossMargin,
+            estimatedCostUsd: economics.totalCostUsd,
+            expectedFeesUsd: economics.platformFeesUsd,
+            priceUsd: economics.priceUsd,
+            overallScore: score.overall,
+            recommendation: score.recommendation,
+            estimateComplete: economics.complete,
+            marketKey: marketKeys.has(analysis.serviceFamily) ? analysis.serviceFamily : opp.marketKey,
+          })
+          .where(and(eq(opportunity.id, opp.id), inArray(opportunity.status, ["analysed", "shortlisted"])))
+          .returning({ status: opportunity.status });
+        if (!updated[0]) return;
+        await emitEvent(tx, {
+          tenantId,
+          type: "opportunity.analysed",
+          level: "info",
+          agent: "analyst",
+          runId: ctx.runId,
+          subjectType: "opportunity",
+          subjectId: opp.id,
+          message,
+          data: { provider: res.family, model: res.model, refined: true },
+        });
+        if (updated[0].status === "analysed" && score.recommendation === "pursue") {
+          await transition(tx, { machine: "opportunity", id: opp.id, tenantId, to: "shortlisted", actor, reason: score.reasons[0] });
+        }
+      });
+      ctx.summary = message;
+      return { status: "refined" as const, recommendation: score.recommendation };
+    },
+  );
 }

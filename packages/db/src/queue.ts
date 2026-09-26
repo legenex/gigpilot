@@ -14,6 +14,7 @@ export const QUEUE_CONFIG: Record<QueueName, QueueOptions> = {
   [QUEUES.sourceRefresh]: { policy: "stately", retryLimit: 3, retryDelay: 60, retryBackoff: true, expireInSeconds: 300 },
   [QUEUES.sourceRefreshAll]: { policy: "singleton", retryLimit: 1, expireInSeconds: 300 },
   [QUEUES.opportunityAnalyse]: { policy: "stately", retryLimit: 3, retryDelay: 30, retryBackoff: true, expireInSeconds: 600 },
+  [QUEUES.opportunityRefine]: { policy: "stately", retryLimit: 2, retryDelay: 60, retryBackoff: true, expireInSeconds: 900 },
   [QUEUES.opportunityExpire]: { policy: "singleton", retryLimit: 1, expireInSeconds: 300 },
   [QUEUES.proposalGenerate]: { policy: "stately", retryLimit: 2, retryDelay: 20, retryBackoff: true, expireInSeconds: 900 },
   [QUEUES.applicationSubmit]: { policy: "exclusive", retryLimit: 2, retryDelay: 60, retryBackoff: true, expireInSeconds: 300 },

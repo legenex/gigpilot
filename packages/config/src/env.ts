@@ -76,6 +76,8 @@ export const envSchema = z.object({
   GX_MODEL_CODE: z.string().default("gx-code"),
   GX_MODEL_AUTO: z.string().default("gx-auto"),
   GX_MAX_CONCURRENCY: z.coerce.number().int().min(1).max(8).default(2),
+  /** Max concurrent GigPilot requests to heavy GX models (gx-code/gx-auto): 2 slots cluster-wide, shared. */
+  GX_CODE_MAX_CONCURRENCY: z.coerce.number().int().min(1).max(4).default(1),
   GX_TIMEOUT_MS: z.coerce.number().int().default(180_000),
 
   XAI_API_KEY: optionalSecret,

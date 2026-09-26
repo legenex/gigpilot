@@ -83,6 +83,7 @@ export const QUEUES = {
   sourceRefresh: "source-refresh",
   sourceRefreshAll: "source-refresh-all",
   opportunityAnalyse: "opportunity-analyse",
+  opportunityRefine: "opportunity-refine",
   opportunityExpire: "opportunity-expire",
   proposalGenerate: "proposal-generate",
   applicationSubmit: "application-submit",
@@ -104,7 +105,10 @@ export type QueueName = (typeof QUEUES)[keyof typeof QUEUES];
 export interface QueuePayloads {
   "source-refresh": { tenantId: string; sourceKey: string };
   "source-refresh-all": Record<string, never>;
-  "opportunity-analyse": { tenantId: string; opportunityId: string; force?: boolean };
+  /** force = owner-requested deep (model) analysis instead of triage. */
+  "opportunity-analyse": { tenantId: string; opportunityId: string; force?: boolean; refine?: boolean };
+  /** GX refinement of a triaged pursue candidate (own queue: single heavy-model slot). */
+  "opportunity-refine": { tenantId: string; opportunityId: string };
   "opportunity-expire": Record<string, never>;
   "proposal-generate": { tenantId: string; opportunityId: string; requestedBy?: string };
   "application-submit": { tenantId: string; applicationId: string };

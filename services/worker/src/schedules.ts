@@ -18,6 +18,7 @@ export const CONCURRENCY: Record<QueueName, number> = {
   [QUEUES.sourceRefresh]: 2,
   [QUEUES.sourceRefreshAll]: 1,
   [QUEUES.opportunityAnalyse]: 2,
+  [QUEUES.opportunityRefine]: 1,
   [QUEUES.opportunityExpire]: 1,
   [QUEUES.proposalGenerate]: 2,
   [QUEUES.applicationSubmit]: 1,
