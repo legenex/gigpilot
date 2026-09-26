@@ -3,7 +3,7 @@ import { LegalPage } from "@/components/site/legal-page";
 
 export const metadata: Metadata = {
   title: "Terms",
-  description: "Terms for the GigPilot private beta.",
+  description: "Terms for GigPilot early access.",
   alternates: { canonical: "/terms" },
 };
 
@@ -14,12 +14,12 @@ export default function TermsPage() {
       updated="September 2026"
       intro={
         <>
-          GigPilot is in private beta. These placeholder terms describe how the beta works today; full terms of service will be published
-          before general availability.
+          GigPilot is in early access. These placeholder terms describe how the service works today; full terms of service will be
+          published before general availability.
         </>
       }
     >
-      <h2>The beta</h2>
+      <h2>Early access</h2>
       <p>The service is provided as-is while we build it. Features, limits and availability may change, and the service may be interrupted.</p>
       <h2>Your marketplaces, your accounts</h2>
       <p>

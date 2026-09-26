@@ -333,9 +333,20 @@ function finalizeDoc(ctx: ContentContext): string {
     "",
     "## Notes",
     `- Produced by GigPilot for ${ctx.clientName ?? "the client"} (${familyLabel(ctx.family)})`,
-    "- Every deliverable passed an independent QA review before packaging",
+    "- What was checked (and what was not) is listed in QA-SUMMARY.md in the delivery package",
     ...(ctx.family === "ai-automation" || ctx.family === "web-app-builds"
-      ? ["", "## Runbook", "1. Copy `.env.example` to `.env` and fill in the client-held credentials", "2. `npm install && npm test`", "3. Deploy with the steps in README.md", "", "## Handover checklist", "- [ ] Credentials rotated to client-owned keys", "- [ ] Alert channel confirmed", "- [ ] Walkthrough recorded"]
+      ? [
+          "",
+          "## Runbook",
+          "1. Copy `.env.example` to `.env` and fill in the client-held credentials",
+          "2. `npm install && npm test` — the tests were written but NOT executed by GigPilot; run them before go-live",
+          "3. Deploy with the steps in README.md",
+          "",
+          "## Handover checklist",
+          "- [ ] Credentials rotated to client-owned keys",
+          "- [ ] Alert channel confirmed",
+          "- [ ] Test suite executed in the client environment",
+        ]
       : ["", "## Next steps", "- Review the package and send consolidated feedback in one round"]),
   ].join("\n");
 }

@@ -65,4 +65,28 @@ describe("MockSource (demo marketplace)", () => {
     expect(r1.externalRef).toMatch(/^mock-/);
     expect(r2.externalRef).toBe(r1.externalRef);
   });
+
+  it("samples service families proportionally to Market Lab weights (0% markets never appear)", async () => {
+    const now = at("2026-09-26T10:05:00Z");
+    const count = (items: { raw?: Record<string, unknown> }[]) => {
+      const c: Record<string, number> = {};
+      for (const o of items) if (!(o.raw as { crossPostOf?: string } | undefined)?.crossPostOf) c[String((o.raw as { family?: string }).family)] = (c[String((o.raw as { family?: string }).family)] ?? 0) + 1;
+      return c;
+    };
+    const src = new MockSource({ now });
+    const heavyAutomation = await src.fetchOpportunities({ tenantId: T, weights: [{ key: "ai-automation", weight: 80 }, { key: "image-design", weight: 20 }] });
+    const heavyImage = await src.fetchOpportunities({ tenantId: T, weights: [{ key: "ai-automation", weight: 20 }, { key: "image-design", weight: 80 }] });
+    const a = count(heavyAutomation);
+    const b = count(heavyImage);
+    expect(Object.keys(a).sort()).toEqual(["ai-automation", "image-design"]); // other markets have weight 0
+    expect(a["ai-automation"]!).toBeGreaterThan(a["image-design"] ?? 0);
+    expect(b["image-design"]!).toBeGreaterThan(b["ai-automation"] ?? 0);
+    // Changing the allocation changes the batch (new ids), same allocation is stable.
+    expect(heavyAutomation.map((o) => o.externalId)).not.toEqual(heavyImage.map((o) => o.externalId));
+    const again = await src.fetchOpportunities({ tenantId: T, weights: [{ key: "ai-automation", weight: 80 }, { key: "image-design", weight: 20 }] });
+    expect(again.map((o) => o.externalId)).toEqual(heavyAutomation.map((o) => o.externalId));
+    // Unweighted calls keep the original feed.
+    const plain = await src.fetchOpportunities({ tenantId: T });
+    expect(new Set(plain.map((o) => (o.raw as { family?: string }).family)).size).toBe(6);
+  });
 });

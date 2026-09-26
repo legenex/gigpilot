@@ -26,9 +26,10 @@ import { isQaStep } from "../heuristics/workflows";
 import { notify } from "../lib/notify";
 import { money, quote, round4, safeError, slugify } from "../lib/util";
 import { runAgent, storeFile, type AssetRow, type StepRow } from "../runtime";
-import { draftDeliveryNotes } from "./client";
-import { clientNameOf, testsUnverified } from "./execution";
+import { draftDeliveryNotes, type DeliveryVerification } from "./client";
+import { clientNameOf } from "./execution";
 import { loadActiveSteps } from "./orchestrator";
+import { INDEPENDENCE_LABEL, type ReviewIndependence, type StepReview } from "./qa";
 
 function outputOf(s: StepRow): Record<string, unknown> {
   return (s.output ?? {}) as Record<string, unknown>;
@@ -145,16 +146,39 @@ async function packageDelivery(
       const repairs = await db.select().from(repair).where(eq(repair.jobId, j.id));
       const doneRepairs = repairs.filter((r) => r.status === "succeeded");
       const passed = [...latestByStep.values()].filter((r) => r.verdict === "pass").length;
-      // Simulated / self-reported test runs are never presented as "N tests passing".
-      const unverifiedTests = steps.some((s) => (s.kind === "code" || s.kind === "test") && outputOf(s).testReport !== undefined && testsUnverified(outputOf(s).testReport as never));
-      const testsNote = unverifiedTests ? "tests generated but not executed in this environment" : null;
-      const qaSummary = `${passed}/${latestByStep.size} deliverable checks passed independent QA${doneRepairs.length ? `, ${doneRepairs.length} repair${doneRepairs.length === 1 ? "" : "s"} applied` : ""}${testsNote ? `; ${testsNote}` : ""}`;
+      // What QA actually established (latest QA run): verified vs model-reviewed vs NOT verified.
+      const qaStep = steps.find((s) => isQaStep(s));
+      const stepReviews = ((outputOf(qaStep ?? ({ output: {} } as StepRow)).reviews as StepReview[] | undefined) ?? []);
+      const hasCode = steps.some((s) => s.kind === "code" || s.kind === "test");
+      const independenceOf = (r: (typeof reviews)[number]): ReviewIndependence =>
+        (r.independence as ReviewIndependence | null) ?? (r.provider === "mock" ? "deterministic_only" : "independent");
+      const overall: ReviewIndependence = [...latestByStep.values()].some((r) => independenceOf(r) === "same_model")
+        ? "same_model"
+        : [...latestByStep.values()].every((r) => independenceOf(r) === "deterministic_only")
+          ? "deterministic_only"
+          : "independent";
+      const demoDefectRepaired = doneRepairs.some((r) => /simulated defect/i.test(r.rationale));
+      const verification: DeliveryVerification = {
+        verified: [...new Set(stepReviews.flatMap((r) => r.verified ?? []))],
+        reviewed: [...latestByStep.values()]
+          .filter((r) => independenceOf(r) !== "deterministic_only")
+          .map((r) => `${steps.find((s) => s.id === r.stepId)?.name ?? "Step"}: ${r.provider}/${r.model} — ${INDEPENDENCE_LABEL[independenceOf(r)]}`),
+        notVerified: [
+          ...new Set([
+            ...(hasCode ? ["Automated tests (generated but not executed in this environment — run `npm test` to verify)"] : []),
+            ...stepReviews.flatMap((r) => r.notVerified ?? []),
+          ]),
+        ],
+        demoDefectRepaired,
+      };
+      const testsNote = hasCode ? "tests generated but not executed in this environment" : null;
+      const qaSummary = `${passed}/${latestByStep.size} deliverable checks passed QA (${INDEPENDENCE_LABEL[overall]})${doneRepairs.length ? `, ${doneRepairs.length} repair${doneRepairs.length === 1 ? "" : "s"} applied${demoDefectRepaired ? " (incl. a simulated demo defect)" : ""}` : ""}${testsNote ? `; ${testsNote}` : ""}`;
 
       const [analysisRow] = j.opportunityId
         ? await db.select({ analysis: opportunityAnalysis.analysis }).from(opportunityAnalysis).where(eq(opportunityAnalysis.opportunityId, j.opportunityId)).orderBy(desc(opportunityAnalysis.version)).limit(1)
         : [];
       const clientName = await clientNameOf(j);
-      const notes = await draftDeliveryNotes(ctx, { job: j, clientName, files: listing, qaSummary, repairs: doneRepairs.length, analysis: analysisRow?.analysis ?? null });
+      const notes = await draftDeliveryNotes(ctx, { job: j, clientName, files: listing, qaSummary, repairs: doneRepairs.length, analysis: analysisRow?.analysis ?? null, verification });
 
       const [fresh] = await db.select({ actual: job.actualCostUsd, estimated: job.estimatedCostUsd }).from(job).where(eq(job.id, j.id)).limit(1);
       const actual = Number(fresh?.actual ?? 0);
@@ -178,11 +202,24 @@ async function packageDelivery(
         "",
         qaSummary,
         "",
+        "## Verified deterministically",
+        ...(verification.verified.length ? verification.verified.map((v) => `- ${v}`) : ["- (nothing could be verified deterministically)"]),
+        "",
+        "## Checked by model review",
+        ...(verification.reviewed.length ? verification.reviewed.map((v) => `- ${v}`) : ["- none — no model reviewed this delivery (deterministic checks only)"]),
+        "",
+        "## Not verified",
+        ...(verification.notVerified.length ? verification.notVerified.map((v) => `- ${v}`) : ["- nothing else outstanding"]),
+        "",
+        "## Per-step QA results",
         ...[...latestByStep.values()].map((r) => {
           const step = steps.find((s) => s.id === r.stepId);
-          return `- **${step?.name ?? "Step"}** — ${r.verdict.toUpperCase()} (score ${r.score.toFixed(2)}, reviewer ${r.provider ?? "?"}/${r.model ?? "?"}): ${r.summary}`;
+          const codeStep = step?.kind === "code" || step?.kind === "test";
+          const outcome = r.verdict === "pass" ? (codeStep ? "no blocking QA findings (tests NOT executed)" : "no blocking QA findings") : "blocking QA findings";
+          return `- **${step?.name ?? "Step"}** — ${outcome} (score ${r.score.toFixed(2)}; ${INDEPENDENCE_LABEL[independenceOf(r)]}${r.provider && r.provider !== "mock" ? `, reviewer ${r.provider}/${r.model}` : ""}): ${r.summary}`;
         }),
         ...(repairs.length ? ["", "## Repairs", ...repairs.map((r) => `- ${r.strategy} (${r.status}): ${r.rationale}`)] : []),
+        ...(demoDefectRepaired ? ["", "Demo note: a simulated defect was injected (demo mode) and repaired before packaging."] : []),
         ...(testsNote ? ["", "## Tests", "Automated tests were generated but not executed in this environment (self-reported, unverified). Run `npm test` in the project to verify before relying on them."] : []),
       ].join("\n");
       files["MANIFEST.md"] = strToU8(manifestMd);

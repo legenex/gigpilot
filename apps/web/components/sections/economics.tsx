@@ -4,9 +4,9 @@ import { LazyProfitCalculator } from "./lazy-visuals";
 import type { Preset } from "./profit-calculator";
 
 const PRESETS: { id: string; label: string }[] = [
-  { id: "op_7f3a", label: "UGC ad sprint" },
-  { id: "op_91be", label: "Localisation" },
-  { id: "op_a7d0", label: "Content engine" },
+  { id: "op_7f3a", label: "UGC ads" },
+  { id: "op_91be", label: "Localization" },
+  { id: "op_a7d0", label: "Content" },
   { id: "op_e8a2", label: "Photo set" },
 ];
 

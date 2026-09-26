@@ -14,6 +14,7 @@ import {
   Popover,
   PopoverContent,
   PopoverTrigger,
+  RecChip,
   SegmentedControl,
   Select,
   Skeleton,
@@ -28,9 +29,11 @@ import {
   formatUsd,
 } from "@gigpilot/ui";
 import { OPPORTUNITY_STATES, type OpportunityState } from "@gigpilot/contracts";
+import { SampleBadge } from "@/components/sample/sample-badge";
 import { fmtAge, fmtBudget } from "@/lib/format";
-import { OPPORTUNITY_META, RECOMMENDATION_META, SOURCE_SHORT } from "@/lib/labels";
+import { OPPORTUNITY_META, SOURCE_SHORT, serviceFamilyLabel } from "@/lib/labels";
 import type { RadarFilters, RadarRow, SortKey } from "@/lib/queries/radar";
+import { isSample } from "@/lib/sample";
 
 interface Props {
   rows: RadarRow[];
@@ -41,42 +44,56 @@ interface Props {
   filters: RadarFilters;
   pane: ReactNode;
   nowMs: number;
+  /** Tenant creation (ISO) — rows created before it are sample history. */
+  sampleBefore?: string | null;
 }
 
+/**
+ * Column priority. `tier` decides the smallest viewport that shows the column;
+ * everything hidden still lives in the side pane. Base columns always show.
+ */
+type Tier = "base" | "lg" | "xl" | "wide" | "2xl" | "max";
 type Col = {
   key: string;
   label: string;
   sort?: SortKey;
   align?: "left" | "right";
-  secondary?: boolean;
+  tier: Tier;
   className?: string;
   title?: string;
 };
 
+const TIER_CLASS: Record<Tier, string> = {
+  base: "",
+  lg: "hidden lg:table-cell",
+  xl: "hidden xl:table-cell",
+  wide: "hidden min-[1400px]:table-cell",
+  "2xl": "hidden 2xl:table-cell",
+  max: "hidden min-[1800px]:table-cell",
+};
+
 const COLS: Col[] = [
-  { key: "source", label: "Source", sort: "source", secondary: true, className: "w-[84px]" },
-  { key: "title", label: "Opportunity", sort: "title", className: "min-w-[280px] max-w-[340px]" },
-  { key: "profit", label: "Exp. profit", sort: "profit", align: "right" },
-  { key: "margin", label: "Margin", sort: "margin", align: "right" },
-  { key: "rec", label: "Rec", sort: "rec", className: "w-[96px]" },
-  { key: "budget", label: "Budget", sort: "budget", align: "right", secondary: true },
-  { key: "cost", label: "Est. cost", sort: "cost", align: "right", secondary: true, title: "Estimated production + overhead cost (excl. platform fees)" },
-  { key: "fees", label: "Fees", sort: "fees", align: "right", secondary: true },
-  { key: "deadline", label: "Deadline", sort: "deadline", align: "right", secondary: true },
-  { key: "age", label: "Age", sort: "age", align: "right", secondary: true },
-  { key: "fit", label: "Fit", sort: "fit", align: "right", secondary: true },
-  { key: "complexity", label: "Cplx", sort: "complexity", align: "right", secondary: true, title: "Complexity" },
-  { key: "rrisk", label: "Rev risk", sort: "rrisk", align: "right", secondary: true, title: "Revision risk" },
-  { key: "drisk", label: "DL risk", sort: "drisk", align: "right", secondary: true, title: "Deadline risk" },
-  { key: "confidence", label: "Conf", sort: "confidence", align: "right", secondary: true, title: "Analysis confidence" },
-  { key: "client", label: "Client", sort: "client", secondary: true, className: "max-w-[150px]" },
-  { key: "market", label: "Category", sort: "market", secondary: true, className: "max-w-[160px]" },
-  { key: "status", label: "Status", sort: "status", secondary: true },
+  { key: "title", label: "Opportunity", sort: "title", tier: "base", className: "min-w-[200px]" },
+  { key: "profit", label: "Exp. profit", sort: "profit", align: "right", tier: "base", title: "Expected profit after production, contingencies, owner time and platform fees" },
+  { key: "margin", label: "Margin", sort: "margin", align: "right", tier: "base", title: "Margin after owner time" },
+  { key: "rec", label: "Rec", sort: "rec", tier: "base", className: "w-[104px]", title: "Recommendation" },
+  { key: "budget", label: "Budget", sort: "budget", align: "right", tier: "lg" },
+  { key: "cost", label: "Est. cost", sort: "cost", align: "right", tier: "xl", title: "Estimated production + overhead cost (excl. platform fees)" },
+  { key: "fees", label: "Fees", sort: "fees", align: "right", tier: "2xl", title: "Platform fees" },
+  { key: "deadline", label: "Deadline", sort: "deadline", align: "right", tier: "2xl" },
+  { key: "age", label: "Age", sort: "age", align: "right", tier: "lg" },
+  { key: "fit", label: "Fit", sort: "fit", align: "right", tier: "xl" },
+  { key: "complexity", label: "Complexity", sort: "complexity", align: "right", tier: "max" },
+  { key: "rrisk", label: "Rev. risk", sort: "rrisk", align: "right", tier: "max", title: "Revision risk" },
+  { key: "drisk", label: "Deadline risk", sort: "drisk", align: "right", tier: "max" },
+  { key: "confidence", label: "Confidence", sort: "confidence", align: "right", tier: "wide", title: "Analysis confidence" },
+  { key: "status", label: "Status", sort: "status", tier: "wide" },
+  { key: "source", label: "Source", sort: "source", tier: "2xl", className: "w-[84px]" },
 ];
 
 const DEFAULT_DIR: Partial<Record<SortKey, "asc" | "desc">> = { source: "asc", title: "asc", client: "asc", market: "asc", deadline: "asc", age: "asc", status: "asc" };
 
-export function RadarWorkspace({ rows, total, counts, markets, sources, filters, pane, nowMs }: Props) {
+export function RadarWorkspace({ rows, total, counts, markets, sources, filters, pane, nowMs, sampleBefore }: Props) {
   const router = useRouter();
   const pathname = usePathname();
   const params = useSearchParams();
@@ -135,7 +152,8 @@ export function RadarWorkspace({ rows, total, counts, markets, sources, filters,
       const id = rows[next]?.id;
       if (id && id !== sel) {
         navigate({ sel: id });
-        tableRef.current?.querySelector(`[data-opportunity-id="${id}"]`)?.scrollIntoView({ block: "nearest" });
+        const el = [...(tableRef.current?.querySelectorAll<HTMLElement>(`[data-opportunity-id="${id}"]`) ?? [])].find((x) => x.offsetParent !== null);
+        el?.scrollIntoView({ block: "nearest" });
       }
     };
     window.addEventListener("keydown", onKey);
@@ -166,6 +184,10 @@ export function RadarWorkspace({ rows, total, counts, markets, sources, filters,
 
   const selectRow = (id: string) => navigate({ sel: id === sel ? undefined : id }, "push");
   const paneLoading = isPending && pendingSel !== null && pendingSel !== sel;
+  // Source is noise when every row comes from the same place.
+  const multiSource = new Set(rows.map((r) => r.sourceKey)).size > 1;
+  const cols = COLS.filter((c) => (c.key !== "source" || multiSource) && (!compact || c.tier === "base"));
+  const other = Math.max(0, counts.all - counts.pursue - counts.review);
 
   return (
     <div className="flex min-w-0 flex-col gap-4">
@@ -180,10 +202,12 @@ export function RadarWorkspace({ rows, total, counts, markets, sources, filters,
             { value: "all", label: "All", count: counts.all, href: hrefWith({ view: "all", status: undefined, sort: undefined, dir: undefined }), testId: "radar-view-all" },
           ]}
         />
-        <p className="ml-auto flex items-center gap-2 text-xs text-fg-3" aria-live="polite">
+        <p className="flex items-center gap-2 text-xs text-fg-3 sm:ml-auto" aria-live="polite">
           {isPending ? <span className="size-3 animate-spin rounded-full border-[1.5px] border-fg-3 border-t-transparent" aria-hidden /> : null}
-          {rows.length < total ? `Showing ${rows.length} of ${total}` : `${total} opportunit${total === 1 ? "y" : "ies"}`}
-          <span className="hidden items-center gap-1 lg:flex">
+          <span title="Pursue now and Needs review never overlap; All also includes skipped and decided opportunities.">
+            {rows.length < total ? `Showing ${rows.length} of ${total}` : `${total} shown`} · All = {counts.pursue} pursue + {counts.review} review + {other} skipped or decided
+          </span>
+          <span className="hidden items-center gap-1 xl:flex">
             · <Kbd>J</Kbd>
             <Kbd>K</Kbd> to move
           </span>
@@ -196,7 +220,7 @@ export function RadarWorkspace({ rows, total, counts, markets, sources, filters,
           <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-fg-3" aria-hidden />
           <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search title, client, brief…" aria-label="Search opportunities" className="pl-8" />
         </div>
-        <Select selectSize="md" aria-label="Source" value={filters.source ?? ""} onChange={(e) => navigate({ source: e.target.value || undefined })} className="w-[132px]">
+        <Select selectSize="md" aria-label="Source" value={filters.source ?? ""} onChange={(e) => navigate({ source: e.target.value || undefined })} className="min-w-[132px] flex-1 sm:w-[132px] sm:flex-none">
           <option value="">All sources</option>
           {sources.map((s) => (
             <option key={s} value={s}>
@@ -204,7 +228,7 @@ export function RadarWorkspace({ rows, total, counts, markets, sources, filters,
             </option>
           ))}
         </Select>
-        <Select aria-label="Service type" value={filters.market ?? ""} onChange={(e) => navigate({ market: e.target.value || undefined })} className="w-[184px]">
+        <Select aria-label="Service type" value={filters.market ?? ""} onChange={(e) => navigate({ market: e.target.value || undefined })} className="min-w-[160px] flex-1 sm:w-[184px] sm:flex-none">
           <option value="">All service types</option>
           {markets.map((m) => (
             <option key={m.key} value={m.key}>
@@ -212,7 +236,7 @@ export function RadarWorkspace({ rows, total, counts, markets, sources, filters,
             </option>
           ))}
         </Select>
-        <Select aria-label="Status" value={filters.status ?? ""} onChange={(e) => navigate({ status: e.target.value || undefined })} className="w-[132px]">
+        <Select aria-label="Status" value={filters.status ?? ""} onChange={(e) => navigate({ status: e.target.value || undefined })} className="min-w-[132px] flex-1 sm:w-[132px] sm:flex-none">
           <option value="">Any status</option>
           {OPPORTUNITY_STATES.filter((s) => s !== "archived").map((s) => (
             <option key={s} value={s}>
@@ -273,29 +297,47 @@ export function RadarWorkspace({ rows, total, counts, markets, sources, filters,
               }
             />
           ) : (
-            <DataTable label="Opportunities" minWidth={compact ? undefined : 1500} className="rounded-md ring-1 ring-inset ring-line [&_table]:min-w-full" style={{ maxHeight: compact ? "calc(100dvh - 220px)" : undefined }}>
-              <THead sticky>
-                <tr>
-                  {COLS.filter((c) => !(compact && c.secondary)).map((c) => (
-                    <TH key={c.key} align={c.align} className={cn(c.key === "title" && "sticky left-0 z-[2] bg-bg", c.className)} title={c.title} aria-sort={filters.sort === c.sort ? (filters.dir === "asc" ? "ascending" : "descending") : undefined}>
-                      {c.sort ? (
-                        <Link href={sortHref(c.sort)} scroll={false} className={cn("inline-flex items-center gap-1 hover:text-fg-2", filters.sort === c.sort && "text-fg")}>
-                          {c.label}
-                          {filters.sort === c.sort ? filters.dir === "asc" ? <ArrowUp className="size-3" /> : <ArrowDown className="size-3" /> : null}
-                        </Link>
-                      ) : (
-                        c.label
-                      )}
-                    </TH>
+            <>
+              <DataTable
+                label="Opportunities"
+                stickyFirst={!compact}
+                className="hidden rounded-md ring-1 ring-inset ring-line md:block [&_table]:min-w-full"
+                style={{ maxHeight: compact ? "calc(100dvh - 220px)" : undefined }}
+              >
+                <THead sticky>
+                  <tr>
+                    {cols.map((c) => (
+                      <TH
+                        key={c.key}
+                        align={c.align}
+                        className={cn(TIER_CLASS[c.tier], c.className)}
+                        title={c.title}
+                        aria-sort={filters.sort === c.sort ? (filters.dir === "asc" ? "ascending" : "descending") : undefined}
+                      >
+                        {c.sort ? (
+                          <Link href={sortHref(c.sort)} scroll={false} className={cn("focus-inset inline-flex items-center gap-1 rounded-xs hover:text-fg-2", filters.sort === c.sort && "text-fg")}>
+                            {c.label}
+                            {filters.sort === c.sort ? filters.dir === "asc" ? <ArrowUp className="size-3" /> : <ArrowDown className="size-3" /> : null}
+                          </Link>
+                        ) : (
+                          c.label
+                        )}
+                      </TH>
+                    ))}
+                  </tr>
+                </THead>
+                <TBody>
+                  {rows.map((r) => (
+                    <RadarTableRow key={r.id} r={r} cols={cols} compact={compact} selected={r.id === (pendingSel ?? sel)} onSelect={selectRow} href={hrefWith({ sel: r.id })} nowMs={nowMs} sample={isSample(r.createdAt, sampleBefore)} />
                   ))}
-                </tr>
-              </THead>
-              <TBody>
+                </TBody>
+              </DataTable>
+              <ul className="divide-y divide-line rounded-md ring-1 ring-inset ring-line md:hidden" aria-label="Opportunities">
                 {rows.map((r) => (
-                  <RadarTableRow key={r.id} r={r} compact={compact} selected={r.id === (pendingSel ?? sel)} onSelect={selectRow} href={hrefWith({ sel: r.id })} nowMs={nowMs} />
+                  <RadarListRow key={r.id} r={r} selected={r.id === (pendingSel ?? sel)} onSelect={selectRow} href={hrefWith({ sel: r.id })} nowMs={nowMs} sample={isSample(r.createdAt, sampleBefore)} />
                 ))}
-              </TBody>
-            </DataTable>
+              </ul>
+            </>
           )}
         </div>
 
@@ -340,18 +382,121 @@ function PaneSkeleton() {
   );
 }
 
-function RadarTableRow({ r, compact, selected, onSelect, href, nowMs }: { r: RadarRow; compact: boolean; selected: boolean; onSelect: (id: string) => void; href: string; nowMs: number }) {
-  const rec = r.recommendation ? RECOMMENDATION_META[r.recommendation] : null;
+function dlText(dl: number | null): string {
+  if (dl === null) return "—";
+  if (dl < 0) return "passed";
+  if (dl < 1) return `${Math.max(1, Math.round(dl * 24))}h`;
+  return `${Math.round(dl)}d`;
+}
+
+function ProfitValue({ r }: { r: RadarRow }) {
+  if (r.recommendation === null) return <PendingCell />;
+  return (
+    <span className="inline-flex items-center gap-1">
+      {r.estimateComplete === false ? (
+        <span className="text-warn" title="Incomplete estimate — some line items are unpriced">
+          ≈
+        </span>
+      ) : null}
+      {formatUsd(r.expectedProfitUsd)}
+    </span>
+  );
+}
+
+function rowMeta(r: RadarRow): string {
+  return [SOURCE_SHORT[r.sourceKey] ?? r.sourceKey, r.clientName, r.marketKey ? serviceFamilyLabel(r.marketKey, true) : r.marketName].filter(Boolean).join(" · ");
+}
+
+function RadarTableRow({ r, cols, compact, selected, onSelect, href, nowMs, sample }: { r: RadarRow; cols: Col[]; compact: boolean; selected: boolean; onSelect: (id: string) => void; href: string; nowMs: number; sample: boolean }) {
   const st = OPPORTUNITY_META[r.status as OpportunityState];
   const ageH = (nowMs - new Date(r.postedAt ?? r.createdAt).getTime()) / 3_600_000;
   const dl = r.deadlineAt ? (new Date(r.deadlineAt).getTime() - nowMs) / 86_400_000 : null;
   const pending = r.recommendation === null;
-  const show = (secondary: boolean) => !(compact && secondary);
+  const cell = (c: Col): ReactNode => {
+    const tier = TIER_CLASS[c.tier];
+    switch (c.key) {
+      case "source":
+        return <TD key={c.key} className={cn(tier, "font-mono text-[11px] uppercase tracking-[0.05em] text-fg-3")}>{SOURCE_SHORT[r.sourceKey] ?? r.sourceKey}</TD>;
+      case "title":
+        return (
+          <TD key={c.key} className={cn("whitespace-normal py-1.5", compact ? "min-w-[200px] max-w-[280px]" : "max-w-[380px]", selected ? "bg-surface-2" : "group-hover/row:bg-surface-1")}>
+            <Link
+              href={href}
+              scroll={false}
+              onClick={(e) => {
+                e.preventDefault();
+                onSelect(r.id);
+              }}
+              className="focus-inset line-clamp-2 rounded-xs font-medium leading-5 text-fg"
+              title={r.title}
+            >
+              {r.title}
+            </Link>
+            <span className="flex min-w-0 items-center gap-1.5 text-[11px] leading-4 text-fg-3">
+              <span className="truncate">
+                {rowMeta(r)}
+                {compact ? ` · ${fmtBudget(r.budgetType, r.budgetMinUsd, r.budgetMaxUsd)}` : ""}
+              </span>
+              {sample ? <SampleBadge className="h-4" /> : null}
+            </span>
+          </TD>
+        );
+      case "profit":
+        return (
+          <TD key={c.key} num className={cn(tier, r.expectedProfitUsd !== null && r.expectedProfitUsd < 0 ? "text-risk" : "text-fg")}>
+            <ProfitValue r={r} />
+          </TD>
+        );
+      case "margin":
+        return (
+          <TD key={c.key} num className={cn(tier, r.expectedMargin !== null && r.expectedMargin < 0.5 ? "text-fg-3" : "text-fg")}>
+            {pending ? <PendingCell /> : formatPct(r.expectedMargin)}
+          </TD>
+        );
+      case "rec":
+        return (
+          <TD key={c.key} className={tier}>
+            <RecChip rec={r.recommendation} pending={r.status === "analysing" ? "analysing" : "queued"} />
+          </TD>
+        );
+      case "budget":
+        return <TD key={c.key} num className={tier}>{fmtBudget(r.budgetType, r.budgetMinUsd, r.budgetMaxUsd)}</TD>;
+      case "cost":
+        return <TD key={c.key} num className={cn(tier, "text-fg-2")}>{pending ? <PendingCell /> : formatUsd(r.estimatedCostUsd)}</TD>;
+      case "fees":
+        return <TD key={c.key} num className={cn(tier, "text-fg-2")}>{pending ? <PendingCell /> : formatUsd(r.expectedFeesUsd)}</TD>;
+      case "deadline":
+        return <TD key={c.key} num className={cn(tier, dl !== null && dl < 2 ? "text-warn" : "text-fg-2")}>{dlText(dl)}</TD>;
+      case "age":
+        return <TD key={c.key} num className={cn(tier, "text-fg-2")}>{fmtAge(ageH)}</TD>;
+      case "fit":
+        return <TD key={c.key} align="right" className={tier}><MiniMeter value={r.fit} /></TD>;
+      case "complexity":
+        return <TD key={c.key} align="right" className={tier}><MiniMeter value={r.complexity} invert /></TD>;
+      case "rrisk":
+        return <TD key={c.key} align="right" className={tier}><MiniMeter value={r.revisionRisk} invert /></TD>;
+      case "drisk":
+        return <TD key={c.key} align="right" className={tier}><MiniMeter value={r.deadlineRisk} invert /></TD>;
+      case "confidence":
+        return <TD key={c.key} align="right" className={tier}><MiniMeter value={r.confidence} /></TD>;
+      case "status":
+        return (
+          <TD key={c.key} className={tier}>
+            <span className="inline-flex items-center gap-1.5 text-xs text-fg-2">
+              <StatusDot tone={st.tone} live={st.live} />
+              {st.label}
+            </span>
+          </TD>
+        );
+      default:
+        return null;
+    }
+  };
   return (
     <TR
       interactive
       selected={selected}
-      className={compact ? "[&>td]:h-11" : undefined}
+      className="[&>td]:h-12"
       onClick={(e) => {
         if ((e.target as HTMLElement).closest("a")) return;
         onSelect(r.id);
@@ -361,8 +506,24 @@ function RadarTableRow({ r, compact, selected, onSelect, href, nowMs }: { r: Rad
       data-recommendation={r.recommendation ?? "pending"}
       data-status={r.status}
     >
-      {show(true) ? <TD className="font-mono text-[10.5px] uppercase tracking-[0.05em] text-fg-3">{SOURCE_SHORT[r.sourceKey] ?? r.sourceKey}</TD> : null}
-      <TD className={cn("sticky left-0 z-[1] max-w-[360px] bg-bg group-hover/row:bg-surface-1", selected && "bg-surface-2 group-hover/row:bg-surface-2")}>
+      {cols.map(cell)}
+    </TR>
+  );
+}
+
+/** Below md: stacked row — title + meta left; profit, margin and recommendation right. */
+function RadarListRow({ r, selected, onSelect, href, nowMs, sample }: { r: RadarRow; selected: boolean; onSelect: (id: string) => void; href: string; nowMs: number; sample: boolean }) {
+  const ageH = (nowMs - new Date(r.postedAt ?? r.createdAt).getTime()) / 3_600_000;
+  const pending = r.recommendation === null;
+  return (
+    <li
+      className={cn("relative flex gap-3 px-3.5 py-3", selected ? "bg-surface-2" : "active:bg-surface-1")}
+      data-testid="radar-row"
+      data-opportunity-id={r.id}
+      data-recommendation={r.recommendation ?? "pending"}
+      data-status={r.status}
+    >
+      <div className="min-w-0 flex-1">
         <Link
           href={href}
           scroll={false}
@@ -370,73 +531,28 @@ function RadarTableRow({ r, compact, selected, onSelect, href, nowMs }: { r: Rad
             e.preventDefault();
             onSelect(r.id);
           }}
-          className="block truncate font-medium text-fg outline-none focus-visible:underline"
-          title={r.title}
+          className="line-clamp-2 text-[13px] font-medium leading-5 text-fg outline-none after:absolute after:inset-0 focus-visible:after:outline-2 focus-visible:after:-outline-offset-2 focus-visible:after:outline-accent"
         >
           {r.title}
         </Link>
-        {compact ? (
-          <span className="block truncate text-[11px] leading-4 text-fg-3">
-            {SOURCE_SHORT[r.sourceKey] ?? r.sourceKey} · {r.clientName ?? "—"} · {fmtBudget(r.budgetType, r.budgetMinUsd, r.budgetMaxUsd)}
-          </span>
-        ) : null}
-      </TD>
-      <TD num className={cn(r.expectedProfitUsd !== null && r.expectedProfitUsd < 0 ? "text-risk" : "text-fg")}>
-        {pending ? <PendingCell /> : (
-          <span className="inline-flex items-center gap-1">
-            {r.estimateComplete === false ? <span className="text-warn" title="Incomplete estimate">≈</span> : null}
-            {formatUsd(r.expectedProfitUsd)}
-          </span>
-        )}
-      </TD>
-      <TD num className={cn(r.expectedMargin !== null && r.expectedMargin < 0.5 ? "text-fg-3" : "text-fg")}>{pending ? <PendingCell /> : formatPct(r.expectedMargin)}</TD>
-      <TD>
-        {rec ? (
-          <span className={cn("inline-flex items-center gap-1.5 text-xs font-medium", r.recommendation === "pursue" ? "text-profit" : r.recommendation === "consider" ? "text-warn" : "text-fg-3")}>
-            <StatusDot tone={rec.tone} />
-            {rec.label}
-          </span>
-        ) : (
-          <span className="inline-flex items-center gap-1.5 text-xs text-fg-3">
-            <StatusDot tone="info" live={r.status === "analysing"} />
-            {r.status === "analysing" ? "Analysing" : "Queued"}
-          </span>
-        )}
-      </TD>
-      {show(true) ? <TD num>{fmtBudget(r.budgetType, r.budgetMinUsd, r.budgetMaxUsd)}</TD> : null}
-      {show(true) ? <TD num className="text-fg-2">{pending ? <PendingCell /> : formatUsd(r.estimatedCostUsd)}</TD> : null}
-      {show(true) ? <TD num className="text-fg-2">{pending ? <PendingCell /> : formatUsd(r.expectedFeesUsd)}</TD> : null}
-      {show(true) ? <TD num className={cn(dl !== null && dl < 2 ? "text-warn" : "text-fg-2")}>{dl === null ? "—" : dl < 0 ? "passed" : dl < 1 ? `${Math.max(1, Math.round(dl * 24))}h` : `${Math.round(dl)}d`}</TD> : null}
-      {show(true) ? <TD num className="text-fg-2">{fmtAge(ageH)}</TD> : null}
-      {show(true) ? <TD align="right"><MiniMeter value={r.fit} /></TD> : null}
-      {show(true) ? <TD align="right"><MiniMeter value={r.complexity} invert /></TD> : null}
-      {show(true) ? <TD align="right"><MiniMeter value={r.revisionRisk} invert /></TD> : null}
-      {show(true) ? <TD align="right"><MiniMeter value={r.deadlineRisk} invert /></TD> : null}
-      {show(true) ? <TD align="right"><MiniMeter value={r.confidence} /></TD> : null}
-      {show(true) ? (
-        <TD className="max-w-[150px] truncate text-fg-2" title={r.clientName ?? undefined}>
-          {r.clientName ?? "—"}
-        </TD>
-      ) : null}
-      {show(true) ? (
-        <TD className="max-w-[150px] truncate text-xs text-fg-2" title={r.marketName ?? undefined}>
-          {r.marketName ?? "—"}
-        </TD>
-      ) : null}
-      {show(true) ? (
-        <TD>
-          <span className="inline-flex items-center gap-1.5 text-xs text-fg-2">
-            <StatusDot tone={st.tone} live={st.live} />
-            {st.label}
-          </span>
-        </TD>
-      ) : null}
-    </TR>
+        <p className="mt-0.5 line-clamp-1 text-[11px] leading-4 text-fg-3">
+          {rowMeta(r)} · {fmtBudget(r.budgetType, r.budgetMinUsd, r.budgetMaxUsd)} · {fmtAge(ageH)}
+        </p>
+        {sample ? <SampleBadge className="mt-1 h-4" /> : null}
+      </div>
+      <div className="flex shrink-0 flex-col items-end gap-1">
+        <span className={cn("font-mono text-[13px] tabular", r.expectedProfitUsd !== null && r.expectedProfitUsd < 0 ? "text-risk" : "text-fg")}>
+          <ProfitValue r={r} />
+        </span>
+        <span className="font-mono text-[11px] tabular text-fg-3">{pending ? "—" : `${formatPct(r.expectedMargin)} margin`}</span>
+        <RecChip rec={r.recommendation} pending={r.status === "analysing" ? "analysing" : "queued"} size="sm" />
+      </div>
+    </li>
   );
 }
 
 function PendingCell() {
-  return <span className="inline-block h-2 w-8 rounded-full bg-surface-2" aria-label="pending analysis" />;
+  return <span className="inline-block h-2 w-8 rounded-full bg-surface-2" role="img" aria-label="pending analysis" />;
 }
 
 function AdvancedFilters({ filters, onApply, activeCount }: { filters: RadarFilters; onApply: (p: Record<string, string | undefined>) => void; activeCount: number }) {

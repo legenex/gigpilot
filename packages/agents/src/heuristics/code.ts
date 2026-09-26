@@ -80,11 +80,13 @@ function reportMarkdown(r: CodeArtifact["testReport"]): string {
     "# Test report",
     "",
     `Runner: ${r.runner}`,
-    `Result: **${r.failed === 0 ? "PASS" : "FAIL"}** — ${r.passed} passed, ${r.failed} failed`,
+    `Result: **NOT EXECUTED** — ${r.tests.length} tests written; no test runner executed them in GigPilot's environment. Status below is self-reported by the generator (unverified).`,
     "",
-    "| Test | Status | Duration |",
-    "|---|---|---|",
-    ...r.tests.map((t) => `| ${t.name} | ${t.status}${t.error ? ` — ${t.error}` : ""} | ${t.durationMs} ms |`),
+    "Run `npm install && npm test` to verify.",
+    "",
+    "| Test | Self-reported status |",
+    "|---|---|",
+    ...r.tests.map((t) => `| ${t.name} | ${t.status}${t.error ? ` — ${t.error}` : ""} (unverified) |`),
   ].join("\n");
 }
 
@@ -123,6 +125,28 @@ export function generateAutomationArtifact(opts: { title: string; brief: string;
         "- Dead-lettered events are written to `dead-letter/` with the payload and reason; replay with `npm run replay <id>`.",
         "- Every event is logged with its id for traceability.",
         n8n ? "- `n8n/workflow.json` contains the equivalent n8n workflow for the self-hosted instance." : "",
+        "- `src/webhook.ts` receives the source webhooks (HMAC-verified) and feeds `processEvent`; failures alert Slack via `src/alerts.ts`.",
+        "- See RUNBOOK.md for operations.",
+      ].join("\n"),
+    },
+    {
+      path: "RUNBOOK.md",
+      content: [
+        `# Runbook — ${source.name} → ${target.name} sync`,
+        "",
+        "## Deploy",
+        "1. `cp .env.example .env` and fill in the client-held credentials (never commit `.env`).",
+        "2. `npm install && npm test` (tests are delivered un-executed — run them before go-live).",
+        `3. Register the webhook endpoint (\`POST /webhooks/${source.key.replace(/\s+/g, "-")}\`) in ${source.name} with the shared secret \`WEBHOOK_SECRET\`.`,
+        "",
+        "## Operate",
+        "- Failures are retried with exponential backoff on 429/5xx, then dead-lettered to `dead-letter/` and alerted to Slack.",
+        "- Replay a dead-lettered event: `npm run replay <id>`.",
+        "",
+        "## Handover checklist",
+        "- [ ] Credentials rotated to client-owned keys",
+        "- [ ] Slack alert channel confirmed",
+        "- [ ] Tests executed in the client environment",
       ].join("\n"),
     },
     {
@@ -133,7 +157,7 @@ export function generateAutomationArtifact(opts: { title: string; brief: string;
         2,
       ),
     },
-    { path: ".env.example", content: [`${source.env}=`, `${target.env}=`, "SLACK_WEBHOOK_URL=", "MAX_RETRIES=5"].join("\n") },
+    { path: ".env.example", content: [`${source.env}=`, `${target.env}=`, "SLACK_WEBHOOK_URL=", "WEBHOOK_SECRET=", "MAX_RETRIES=5"].join("\n") },
     {
       path: "src/retry.ts",
       content: [
@@ -212,6 +236,40 @@ export function generateAutomationArtifact(opts: { title: string; brief: string;
       ].join("\n"),
     },
     {
+      path: "src/webhook.ts",
+      content: [
+        'import { createHmac, timingSafeEqual } from "node:crypto";',
+        'import { processEvent, type SyncDeps } from "./sync";',
+        "",
+        "/** Verify the HMAC-SHA256 signature the source sends with each webhook (hex, header value). */",
+        "export function verifyWebhook(rawBody: string, signature: string | undefined, secret: string): boolean {",
+        '  if (!signature) return false;',
+        '  const expected = createHmac("sha256", secret).update(rawBody).digest("hex");',
+        "  const a = Buffer.from(expected);",
+        "  const b = Buffer.from(signature.replace(/^sha256=/, \"\"));",
+        "  return a.length === b.length && timingSafeEqual(a, b);",
+        "}",
+        "",
+        "/** Webhook handler: verify, parse, process (idempotent upsert + retry + dead-letter). */",
+        "export async function handleWebhook(rawBody: string, signature: string | undefined, deps: SyncDeps & { secret: string }) {",
+        "  if (!verifyWebhook(rawBody, signature, deps.secret)) return { status: 401 as const };",
+        "  const event = JSON.parse(rawBody);",
+        "  const result = await processEvent(event, deps);",
+        "  return { status: 200 as const, result };",
+        "}",
+      ].join("\n"),
+    },
+    {
+      path: "src/alerts.ts",
+      content: [
+        "/** Post a failure alert to the client's Slack incoming webhook (SLACK_WEBHOOK_URL). */",
+        "export async function slackAlert(message: string, webhookUrl = process.env.SLACK_WEBHOOK_URL): Promise<void> {",
+        "  if (!webhookUrl) return;",
+        '  await fetch(webhookUrl, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: message }) });',
+        "}",
+      ].join("\n"),
+    },
+    {
       path: "test/sync.test.ts",
       content: [
         'import { describe, expect, it } from "vitest";',
@@ -272,7 +330,7 @@ export function generateAutomationArtifact(opts: { title: string; brief: string;
   );
   files.push({ path: "TEST-REPORT.md", content: reportMarkdown(testReport) });
   return {
-    summary: `${source.name} → ${target.name} sync: mapping, idempotent upsert, retry/backoff, dead-letter + Slack alerts, ${testReport.passed}/${testReport.tests.length} tests passing${opts.repairHint ? " (repaired after QA)" : ""}`,
+    summary: `${source.name} → ${target.name} sync: webhook intake, mapping, idempotent upsert, retry/backoff, dead-letter + Slack alerts; ${testReport.tests.length} tests written (not executed)${opts.repairHint ? " (repaired after QA)" : ""}`,
     files,
     testReport,
   };
@@ -290,7 +348,7 @@ export function generateWebArtifact(opts: { title: string; brief: string; client
         `Built by GigPilot for: ${opts.title}`,
         "",
         "## Stack",
-        "Next.js (App Router), TypeScript, Tailwind CSS. Content lives in `content/` (swap for your headless CMS).",
+        "Next.js (App Router), TypeScript, Tailwind CSS. Blog content comes from the headless CMS (`lib/cms.ts`, set `CMS_API_URL` / `CMS_TOKEN`); `app/sitemap.ts` generates the sitemap.",
         "",
         "## Develop",
         "```bash",
@@ -362,6 +420,52 @@ export function generateWebArtifact(opts: { title: string; brief: string; client
       ].join("\n"),
     },
     {
+      path: "lib/cms.ts",
+      content: [
+        "/** Minimal headless-CMS client (Sanity/Contentful-style REST). CMS_API_URL + CMS_TOKEN are client-held. */",
+        "export interface Post { slug: string; title: string; excerpt: string; publishedAt: string }",
+        "",
+        "export async function listPosts(fetcher: typeof fetch = fetch): Promise<Post[]> {",
+        "  const base = process.env.CMS_API_URL;",
+        "  if (!base) return [];",
+        '  const res = await fetcher(`${base.replace(/\\/+$/, "")}/posts`, { headers: { authorization: `Bearer ${process.env.CMS_TOKEN ?? ""}` }, next: { revalidate: 300 } } as RequestInit);',
+        "  if (!res.ok) throw new Error(`CMS responded ${res.status}`);",
+        "  return (await res.json()) as Post[];",
+        "}",
+      ].join("\n"),
+    },
+    {
+      path: "app/blog/page.tsx",
+      content: [
+        'import { listPosts } from "@/lib/cms";',
+        "",
+        "export default async function Blog() {",
+        "  const posts = await listPosts();",
+        "  return (",
+        '    <main className="mx-auto max-w-3xl px-6 py-16">',
+        '      <h1 className="text-4xl font-bold">Blog</h1>',
+        "      <ul>{posts.map((p) => (<li key={p.slug}><a href={`/blog/${p.slug}`}>{p.title}</a><p>{p.excerpt}</p></li>))}</ul>",
+        "    </main>",
+        "  );",
+        "}",
+      ].join("\n"),
+    },
+    {
+      path: "app/sitemap.ts",
+      content: [
+        'import type { MetadataRoute } from "next";',
+        'import { listPosts } from "@/lib/cms";',
+        "",
+        'const BASE = process.env.SITE_URL ?? "https://example.com";',
+        'const PAGES = ["", "/about", "/services", "/blog", "/contact"];',
+        "",
+        "export default async function sitemap(): Promise<MetadataRoute.Sitemap> {",
+        "  const posts = await listPosts().catch(() => []);",
+        "  return [...PAGES.map((p) => ({ url: `${BASE}${p}` })), ...posts.map((p) => ({ url: `${BASE}/blog/${p.slug}`, lastModified: p.publishedAt }))];",
+        "}",
+      ].join("\n"),
+    },
+    {
       path: "components/Section.tsx",
       content: [
         "export function Section({ title, items }: { title: string; items: string[] }) {",
@@ -409,7 +513,7 @@ export function generateWebArtifact(opts: { title: string; brief: string; client
   );
   files.push({ path: "TEST-REPORT.md", content: reportMarkdown(testReport) });
   return {
-    summary: `${brand} site: App Router pages, components, contact validation with honeypot, ${testReport.passed}/${testReport.tests.length} checks passing${opts.repairHint ? " (repaired after QA)" : ""}`,
+    summary: `${brand} site: App Router pages, CMS-backed blog, sitemap, SEO metadata, contact validation with honeypot; ${testReport.tests.length} checks written (not executed)${opts.repairHint ? " (repaired after QA)" : ""}`,
     files,
     testReport,
   };

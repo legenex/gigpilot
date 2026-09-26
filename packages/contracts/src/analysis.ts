@@ -14,6 +14,8 @@ export const capabilitySchema = z.enum([
   "video.image_to_video",
   "audio.voiceover",
   "audio.dub",
+  /** Music / sound design / podcast audio production (no priced route in the catalog yet). */
+  "audio.music",
   "text.copy",
   "text.translate",
   "text.research",
@@ -21,6 +23,8 @@ export const capabilitySchema = z.enum([
   "code.automation",
   "media.finishing",
   "qa.review",
+  /** 3D models / renders (no priced route in the catalog yet). */
+  "model.3d",
 ]);
 export type Capability = z.infer<typeof capabilitySchema>;
 
@@ -34,6 +38,13 @@ export const productionEstimateSchema = z.object({
   attemptsPerUnit: z.number().min(1).max(20),
   /** Optional preferred provider/model hint; the broker decides the route. */
   providerHint: z.string().optional(),
+  /**
+   * How this unit type is priced (set by the sanitiser / triage, never by a model):
+   * "creative" = creative catalog route, "inference" = delivered by model calls and priced
+   * through inferenceEstimates ("priced via inference"), "local" = local tooling ($0),
+   * "unpriced" = no priced route exists (estimate is flagged incomplete).
+   */
+  pricedVia: z.enum(["creative", "inference", "local", "unpriced"]).optional(),
 });
 export type ProductionEstimate = z.infer<typeof productionEstimateSchema>;
 
@@ -106,6 +117,12 @@ export const opportunityAnalysisSchema = z.object({
   /** Concise, user-visible decision rationale (never chain-of-thought). */
   rationale: z.array(z.string()).default([]),
   buyerPriorities: z.array(z.string()).default([]),
+  /**
+   * Concrete features the brief explicitly asks for (e.g. "Stripe billing",
+   * "Magic-link login", "Webhook tests"). Derived deterministically from the brief;
+   * QA checks each one against the produced artifact.
+   */
+  requestedFeatures: z.array(z.string()).optional(),
 });
 export type OpportunityAnalysis = z.infer<typeof opportunityAnalysisSchema>;
 
@@ -150,5 +167,33 @@ export const marketInsightSchema = z.object({
     }),
   ),
   signals: z.array(z.object({ label: z.string(), value: z.string(), trend: z.enum(["up", "down", "flat"]).optional() })).default([]),
+  /**
+   * Whether live web research backed this insight. "none" = no web-search provider was
+   * available, so the text is based on the tenant's own metrics + model knowledge only.
+   */
+  webResearch: z.enum(["live", "none"]).optional(),
 });
 export type MarketInsight = z.infer<typeof marketInsightSchema>;
+
+/**
+ * Stable QA finding codes the dashboard can key on. Findings are free-form
+ * `code` strings, these are the ones GigPilot itself emits with a fixed meaning.
+ */
+export const QA_FINDING_CODES = {
+  /** Code/test deliverable: tests were written but no runner executed them (always present for code). */
+  testsNotExecuted: "tests_not_executed",
+  /** Demo workspaces only: a scripted defect injected on the first attempt to demonstrate QA → repair. */
+  demoInjectedDefect: "demo_injected_defect",
+  /** A feature the brief explicitly requested has no evidence in the produced artifact. */
+  missingFeature: "missing_feature",
+  /** Fewer deliverable units were produced than contracted. */
+  deliverableShortfall: "deliverable_shortfall",
+  /** Two deliverable units are identical (sha256) or perceptually the same. */
+  duplicateDeliverable: "duplicate_deliverable",
+  /** Live workspace: output came from the deterministic mock provider. */
+  producedByMock: "produced_by_mock",
+} as const;
+export type QAFindingCode = (typeof QA_FINDING_CODES)[keyof typeof QA_FINDING_CODES];
+
+/** Message used for every demo-injected defect finding (demo workspaces only). */
+export const DEMO_INJECTED_DEFECT_MESSAGE = "Simulated defect injected for the demo (demo workspaces only)";

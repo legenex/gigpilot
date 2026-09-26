@@ -223,12 +223,35 @@ export interface SubmissionResult {
   detail: string;
 }
 
+/** A sourcing market (service family) and its share of the refresh (Market Lab allocation). */
+export interface MarketWeight {
+  /** Market / service-family key, e.g. "ai-automation". */
+  key: string;
+  /** Relative weight (allocationPct of an enabled market); 0 = do not source this market. */
+  weight: number;
+  /** Search phrases for query-capable adapters (market keywords). */
+  keywords?: string[];
+}
+
+export interface FetchOpportunitiesOptions {
+  tenantId: string;
+  query?: string;
+  limit?: number;
+  since?: Date;
+  /**
+   * Optional per-market sourcing weights from Market Lab (enabled markets only). Adapters
+   * that can bias their feed should sample proportionally; query-capable adapters split
+   * their per-refresh limit across market keywords by weight. Ignored when unsupported.
+   */
+  weights?: MarketWeight[];
+}
+
 export interface SourceAdapter {
   readonly key: string;
   readonly name: string;
   readonly capabilities: SourceCapabilities;
   isConfigured(): boolean;
   health(): Promise<ProviderHealth>;
-  fetchOpportunities(opts: { tenantId: string; query?: string; limit?: number; since?: Date }): Promise<RawOpportunity[]>;
+  fetchOpportunities(opts: FetchOpportunitiesOptions): Promise<RawOpportunity[]>;
   submit?(req: SubmissionRequest): Promise<SubmissionResult>;
 }

@@ -42,6 +42,12 @@ function outputOf(s: StepRow): Record<string, unknown> {
   return (s.output ?? {}) as Record<string, unknown>;
 }
 
+/** Delay before automatic retry n (n = failed attempts so far): 30 s × 2^(n − 1), capped at 10 min. */
+export function retryBackoffSeconds(failedAttempts: number): number {
+  const n = Math.max(1, failedAttempts);
+  return Math.min(OPERATIONAL_DEFAULTS.stepRetryMaxSeconds, OPERATIONAL_DEFAULTS.stepRetryBaseSeconds * 2 ** (n - 1));
+}
+
 /**
  * Orchestrator tick (stately per job). Advances the DAG: promotes steps whose
  * dependencies succeeded, retries failed steps within their attempt limit
@@ -115,15 +121,18 @@ export async function runWorkflowTick(payload: QueuePayloads["workflow-tick"], d
       const qaVerdictFail = isQaStep(s) && outputOf(s).verdict === "fail";
       if (qaVerdictFail) continue; // handled by the Recovery agent
       if (s.attempts < s.maxAttempts) {
+        const backoff = retryBackoffSeconds(s.attempts);
         await transition(db, {
           machine: "step",
           id: s.id,
           tenantId,
           to: "ready",
           actor,
-          reason: `retry ${s.attempts + 1}/${s.maxAttempts}`,
-          event: { type: "step.started", level: "warn", agent: "orchestrator", subjectType: "step", subjectId: s.id, jobId: j.id, message: `Retrying ${s.name} (attempt ${s.attempts + 1} of ${s.maxAttempts})` },
+          reason: `retry ${s.attempts + 1}/${s.maxAttempts} after ${backoff}s backoff`,
+          patch: { output: { ...outputOf(s), retryBackoffSeconds: backoff } },
+          event: { type: "step.started", level: "warn", agent: "orchestrator", subjectType: "step", subjectId: s.id, jobId: j.id, message: `Retrying ${s.name} in ${backoff}s (attempt ${s.attempts + 1} of ${s.maxAttempts})` },
         });
+        s.output = { ...outputOf(s), retryBackoffSeconds: backoff };
         s.status = "ready";
         result.retried.push(s.key);
       } else {
@@ -171,7 +180,9 @@ export async function runWorkflowTick(payload: QueuePayloads["workflow-tick"], d
   const ready = steps.filter((s) => s.status === "ready" && depsDone(s)).slice(0, slots);
   for (const s of ready) {
     const attempt = s.attempts + 1;
-    await deps.queue.send(QUEUES.stepExecute, { tenantId, jobId: j.id, stepId: s.id, attempt }, { singletonKey: `${s.id}:${attempt}` });
+    // Automatic retries of failed attempts back off (30 s × 2^(failures − 1), capped at 10 min).
+    const backoff = typeof outputOf(s).retryBackoffSeconds === "number" ? (outputOf(s).retryBackoffSeconds as number) : 0;
+    await deps.queue.send(QUEUES.stepExecute, { tenantId, jobId: j.id, stepId: s.id, attempt }, { singletonKey: `${s.id}:${attempt}`, ...(backoff > 0 ? { startAfter: backoff } : {}) });
     result.dispatched.push(s.key);
   }
 

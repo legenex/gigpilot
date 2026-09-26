@@ -1,4 +1,4 @@
-import { QUEUES, type QueuePayloads, type RawOpportunity } from "@gigpilot/contracts";
+import { QUEUES, type MarketWeight, type QueuePayloads, type RawOpportunity } from "@gigpilot/contracts";
 import {
   and,
   desc,
@@ -95,9 +95,32 @@ export function matchMarket(
 }
 
 /**
+ * Market Lab allocation → sourcing weights: enabled markets with allocationPct > 0, as
+ * adapter weights (share of the refresh) with their keywords for query-capable adapters.
+ */
+export function marketWeights(markets: { key: string; enabled: boolean; allocationPct: number; keywords: string[] }[]): MarketWeight[] {
+  return markets.filter((m) => m.enabled && m.allocationPct > 0).map((m) => ({ key: m.key, weight: m.allocationPct, keywords: m.keywords }));
+}
+
+/**
+ * Analysis priority for a new brief: budget-driven base, scaled by its market's share of
+ * the allocation (a market allocated 2× the average is analysed first; a 0% / unmatched
+ * market last among equals).
+ */
+export function analysisPriority(base: number, marketKey: string | null, weights: MarketWeight[]): number {
+  if (!weights.length) return base;
+  const total = weights.reduce((a, w) => a + w.weight, 0);
+  const share = marketKey ? (weights.find((w) => w.key === marketKey)?.weight ?? 0) / Math.max(1e-9, total) : 0;
+  const avg = 1 / weights.length;
+  const factor = Math.min(2, Math.max(0.25, share / avg));
+  return Math.max(0, Math.round(base * factor));
+}
+
+/**
  * Opportunity Scout. Pulls from a permitted source adapter (respecting its
- * SourceCapabilities), normalises, matches markets, dedupes, triages budget,
- * inserts idempotently and queues analysis for new rows.
+ * SourceCapabilities) with the tenant's Market Lab allocation as sourcing
+ * weights, normalises, matches markets, dedupes, triages budget, inserts
+ * idempotently and queues analysis (priority scaled by market weight).
  */
 export async function runSourceRefresh(payload: SourceRefreshPayload, deps: AgentDeps): Promise<ScoutResult> {
   const db = getDb();
@@ -144,13 +167,18 @@ export async function runSourceRefresh(payload: SourceRefreshPayload, deps: Agen
       { deps, tenantId, agent: "scout", task: "source.refresh", subjectType: "source", subjectId: row.id, label: `Scout refresh of ${adapter.name}` },
       async (ctx) => {
         const settings = await getTenantSettings(db, tenantId);
+        const markets = await db
+          .select({ key: market.key, enabled: market.enabled, keywords: market.keywords, allocationPct: market.allocationPct })
+          .from(market)
+          .where(eq(market.tenantId, tenantId));
+        const weights = marketWeights(markets);
         const raws = await adapter.fetchOpportunities({
           tenantId,
           limit: 50,
           since: row.lastSyncAt ?? undefined,
           query: typeof row.config.query === "string" ? row.config.query : undefined,
+          weights,
         });
-        const markets = await db.select({ key: market.key, enabled: market.enabled, keywords: market.keywords }).from(market).where(eq(market.tenantId, tenantId));
         const recent: DedupeCandidate[] = await db
           .select({ id: opportunity.id, title: opportunity.title, description: opportunity.description, dedupeHash: opportunity.dedupeHash })
           .from(opportunity)
@@ -257,7 +285,8 @@ export async function runSourceRefresh(payload: SourceRefreshPayload, deps: Agen
           recent.unshift({ id: inserted.id, title: n.title, description: n.description, dedupeHash: hash });
           // Analyse the most valuable briefs first (local GX analysis takes ~30–60 s each).
           const budget = n.budgetMaxUsd ?? n.budgetMinUsd ?? 0;
-          const priority = triage === "low_budget" ? 0 : triage === "unknown_budget" ? 5 : 10 + Math.min(40, Math.floor(budget / 100));
+          const base = triage === "low_budget" ? 0 : triage === "unknown_budget" ? 5 : 10 + Math.min(40, Math.floor(budget / 100));
+          const priority = analysisPriority(base, match?.key ?? null, weights);
           toAnalyse.push({ id: inserted.id, priority });
           await emitEvent(db, {
             tenantId,
@@ -290,7 +319,7 @@ export async function runSourceRefresh(payload: SourceRefreshPayload, deps: Agen
           subjectType: "source",
           subjectId: row.id,
           message: `${adapter.name}: ${result.fetched} fetched · ${result.inserted} new · ${result.duplicates} duplicate${result.duplicates === 1 ? "" : "s"} · ${result.expired} expired on arrival · ${result.known} already known`,
-          data: { ...result, opportunityIds: undefined, trigger },
+          data: { ...result, opportunityIds: undefined, trigger, weights: weights.map((w) => ({ key: w.key, weight: w.weight })) },
         });
         ctx.summary = `${result.inserted} new, ${result.duplicates} duplicates, ${result.expired} expired, ${result.known} known`;
 

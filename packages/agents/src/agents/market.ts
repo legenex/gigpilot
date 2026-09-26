@@ -114,12 +114,19 @@ export async function runMarketResearch(payload: QueuePayloads["market-research"
     });
     const keys = new Set(markets.map((m) => m.key));
     const modelInsight = res.data ?? deterministic;
+    // Without a web-search provider the router answers from model knowledge (GX) — say so.
+    const liveWeb = res.webResearch?.performed === true;
+    const baseSummary = modelInsight.summary || deterministic.summary;
     const insight = {
       headline: modelInsight.headline || deterministic.headline,
-      summary: modelInsight.summary || deterministic.summary,
+      summary: liveWeb ? baseSummary : `${baseSummary} (No live web research — based on your pipeline metrics${res.family === "mock" ? "" : " and model knowledge"} only.)`,
       // Allocation numbers stay deterministic regardless of the model's phrasing.
       recommendations: deterministic.recommendations.filter((r) => keys.has(r.marketKey)),
-      signals: modelInsight.signals?.length ? modelInsight.signals.slice(0, 6) : deterministic.signals,
+      signals: [
+        ...(modelInsight.signals?.length ? modelInsight.signals.slice(0, 5) : deterministic.signals.slice(0, 5)),
+        { label: "Web research", value: liveWeb ? "live (web search)" : "none — no live web research (model knowledge only)" },
+      ],
+      webResearch: liveWeb ? ("live" as const) : ("none" as const),
     };
     const [row] = await db
       .insert(marketInsight)
@@ -133,7 +140,7 @@ export async function runMarketResearch(payload: QueuePayloads["market-research"
       runId: ctx.runId,
       subjectType: "market",
       message: `Market research: ${insight.summary.split(/(?<=\.)\s/)[0] ?? insight.headline}`.slice(0, 400),
-      data: { insightId: row?.id, provider: res.family },
+      data: { insightId: row?.id, provider: res.family, webResearch: insight.webResearch },
     });
     ctx.summary = insight.headline;
     return { status: "researched" as const, insightId: row?.id, recommended };

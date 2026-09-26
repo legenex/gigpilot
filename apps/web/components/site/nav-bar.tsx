@@ -10,12 +10,16 @@ interface NavBarProps {
   /** Resolved on the server per request — never decided on the client. */
   signedIn: boolean;
   urls: { app: string; login: string; signup: string };
-  links: { href: string; label: string; index: string }[];
+  links: { href: string; label: string; index: string; primary: boolean }[];
+  /** The page marks its own primary CTAs with `data-cta-watch`; see SiteHeader. */
+  ctaAware?: boolean;
 }
 
-export function NavBar({ signedIn, urls, links }: NavBarProps) {
+export function NavBar({ signedIn, urls, links, ctaAware = false }: NavBarProps) {
   const [scrolled, setScrolled] = useState(false);
   const [open, setOpen] = useState(false);
+  // Server and first client render agree: on a CTA-aware page the hero CTA is in view at load.
+  const [quiet, setQuiet] = useState(ctaAware);
   const panelId = useId();
   const buttonRef = useRef<HTMLButtonElement>(null);
 
@@ -25,6 +29,29 @@ export function NavBar({ signedIn, urls, links }: NavBarProps) {
     window.addEventListener("scroll", onScroll, { passive: true });
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
+
+  // One solid accent per viewport: step the header button down while a page CTA is visible.
+  useEffect(() => {
+    if (!ctaAware) return;
+    const targets = Array.from(document.querySelectorAll<HTMLElement>("[data-cta-watch]"));
+    if (!targets.length) {
+      const id = requestAnimationFrame(() => setQuiet(false));
+      return () => cancelAnimationFrame(id);
+    }
+    const visible = new Set<Element>();
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting) visible.add(e.target);
+          else visible.delete(e.target);
+        }
+        setQuiet(visible.size > 0);
+      },
+      { rootMargin: "-64px 0px 0px 0px" },
+    );
+    targets.forEach((t) => io.observe(t));
+    return () => io.disconnect();
+  }, [ctaAware]);
 
   useEffect(() => {
     if (!open) return;
@@ -63,18 +90,20 @@ export function NavBar({ signedIn, urls, links }: NavBarProps) {
         </Link>
 
         <ul className="ml-4 hidden items-center gap-1 lg:flex">
-          {links.map((l) => (
-            <li key={l.href}>
-              <a href={l.href} className="focus-ring rounded-sm px-2.5 py-1.5 text-[13px] text-fg-2 transition-colors hover:text-fg">
-                {l.label}
-              </a>
-            </li>
-          ))}
+          {links
+            .filter((l) => l.primary)
+            .map((l) => (
+              <li key={l.href}>
+                <a href={l.href} className="focus-ring rounded-sm px-2.5 py-1.5 text-[13px] text-fg-2 transition-colors hover:text-fg">
+                  {l.label}
+                </a>
+              </li>
+            ))}
         </ul>
 
         <div className="ml-auto flex items-center gap-1.5 sm:gap-2">
           {signedIn ? (
-            <LinkButton href={urls.app} size="sm" data-testid="nav-dashboard">
+            <LinkButton href={urls.app} size="sm" variant={quiet ? "outline" : "primary"} data-testid="nav-dashboard">
               Go to Dashboard
               <ArrowRight aria-hidden className="size-3.5 transition-transform group-hover/btn:translate-x-0.5" strokeWidth={2} />
             </LinkButton>
@@ -83,7 +112,7 @@ export function NavBar({ signedIn, urls, links }: NavBarProps) {
               <LinkButton href={urls.login} variant="ghost" size="sm" data-testid="nav-login">
                 Log in
               </LinkButton>
-              <LinkButton href={urls.signup} size="sm" data-testid="nav-signup">
+              <LinkButton href={urls.signup} size="sm" variant={quiet ? "outline" : "primary"} data-testid="nav-signup">
                 Sign up
               </LinkButton>
             </>

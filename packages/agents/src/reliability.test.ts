@@ -783,8 +783,11 @@ describe("reliability repairs", () => {
     for (const id of ids) await handlers["opportunity-analyse"]({ tenantId: t.tenantId, opportunityId: id }, deps);
     const refines = deps.queue.take("opportunity-refine").map((x) => (x.payload as { opportunityId: string }).opportunityId);
     const events = await db.select().from(agentEvent).where(and(eq(agentEvent.tenantId, t.tenantId), eq(agentEvent.type, "opportunity.analysed")));
-    const pursue = events.filter((e) => (e.data as Record<string, unknown>).recommendation === "pursue");
+    // Triage never recommends pursuit: candidates are stored as "consider" and flagged for refinement.
+    expect(events.every((e) => (e.data as Record<string, unknown>).recommendation !== "pursue")).toBe(true);
+    const pursue = events.filter((e) => (e.data as Record<string, unknown>).pursueCandidate === true);
     expect(pursue.length).toBe(4);
+    expect(pursue.every((e) => (e.data as Record<string, unknown>).recommendation === "consider")).toBe(true);
     expect(refines).toHaveLength(2);
     expect(refines).toEqual(ids.slice(0, 2)); // the two highest-profit candidates
     const skipped = pursue.filter((e) => (e.data as Record<string, unknown>).refineSkipped === "hourly cap");

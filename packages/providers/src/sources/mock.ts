@@ -1,4 +1,4 @@
-import type { ProviderHealth, RawOpportunity, SourceAdapter, SourceCapabilities, SubmissionRequest, SubmissionResult } from "@gigpilot/contracts";
+import type { FetchOpportunitiesOptions, MarketWeight, ProviderHealth, RawOpportunity, SourceAdapter, SourceCapabilities, SubmissionRequest, SubmissionResult } from "@gigpilot/contracts";
 
 /**
  * Demo marketplace. Produces a realistic, deterministic feed of fictional
@@ -672,6 +672,34 @@ function round(n: number, step: number): number {
 const ANCHORS = T.filter((t) => t.anchor);
 const NON_ANCHORS = T.filter((t) => !t.anchor);
 
+/** Normalised family weights (only positive weights of known families), or null when unweighted. */
+function familyWeights(weights: MarketWeight[] | undefined): { family: Family; w: number }[] | null {
+  if (!weights || weights.length === 0) return null;
+  const known = new Set(T.map((t) => t.family));
+  const list = weights
+    .filter((m) => known.has(m.key as Family) && Number.isFinite(m.weight) && m.weight > 0)
+    .map((m) => ({ family: m.key as Family, w: m.weight }));
+  const total = list.reduce((a, x) => a + x.w, 0);
+  if (total <= 0) return null;
+  return list.map((x) => ({ family: x.family, w: x.w / total }));
+}
+
+/** Deterministic weighted pick: u ∈ [0,1) → family by cumulative weight. */
+function pickFamily(weights: { family: Family; w: number }[], u: number): Family {
+  let acc = 0;
+  for (const x of weights) {
+    acc += x.w;
+    if (u < acc) return x.family;
+  }
+  return weights[weights.length - 1]!.family;
+}
+
+/** Stable signature of a weight set (part of the item id so a changed allocation yields new items). */
+function weightSignature(weights: { family: Family; w: number }[] | null): string {
+  if (!weights) return "";
+  return fnv(weights.map((x) => `${x.family}:${x.w.toFixed(3)}`).join("|")).toString(36).slice(0, 5);
+}
+
 export interface MockSourceOptions {
   now?: () => Date;
 }
@@ -710,12 +738,19 @@ export class MockSource implements SourceAdapter {
     };
   }
 
-  /** Items introduced in one bucket (deterministic per tenant + bucket). */
-  bucketItems(tenantId: string, bucket: number): RawOpportunity[] {
+  /**
+   * Items introduced in one bucket (deterministic per tenant + bucket [+ weights]). With
+   * Market Lab `weights`, each item's service family is sampled proportionally to the
+   * weights (a 0-weight / disabled market never appears) and the item ids carry a weight
+   * signature, so changing the allocation changes what the next refresh brings in.
+   */
+  bucketItems(tenantId: string, bucket: number, weights?: MarketWeight[]): RawOpportunity[] {
     const seed = fnv(`${tenantId}|${bucket}`);
     const count = 3 + (seed % 6); // 3–8
     const bucketStart = bucket * BUCKET_MS;
-    const tShort = tenantId.replace(/-/g, "").slice(0, 8);
+    const fw = familyWeights(weights);
+    const sig = weightSignature(fw);
+    const tShort = `${tenantId.replace(/-/g, "").slice(0, 8)}${sig ? `w${sig}` : ""}`;
     const items: RawOpportunity[] = [];
     for (let i = 0; i < count; i++) {
       const s = fnv(`${tenantId}|${bucket}|${i}`);
@@ -723,11 +758,17 @@ export class MockSource implements SourceAdapter {
       const stale = i === 1 && seed % 3 === 0;
       // Templates rotate deterministically so the same brief rarely repeats inside one feed window.
       const offset = fnv(tenantId);
-      const template = crossPost
-        ? null
-        : i === 0
-          ? ANCHORS[(offset + bucket) % ANCHORS.length]!
-          : NON_ANCHORS[(offset + bucket * 7 + (i - 1)) % NON_ANCHORS.length]!;
+      let template: BriefTemplate | null;
+      if (crossPost) template = null;
+      else if (!fw) {
+        template = i === 0 ? ANCHORS[(offset + bucket) % ANCHORS.length]! : NON_ANCHORS[(offset + bucket * 7 + (i - 1)) % NON_ANCHORS.length]!;
+      } else {
+        const family = pickFamily(fw, (fnv(`${tenantId}|${bucket}|${i}|family`) % 10_000) / 10_000);
+        const anchors = ANCHORS.filter((t) => t.family === family);
+        const pool = i === 0 && anchors.length ? anchors : T.filter((t) => t.family === family && (i === 0 || !t.anchor || anchors.length === 0 || (s >>> 2) % 3 === 0));
+        const list = pool.length ? pool : T.filter((t) => t.family === family);
+        template = list[(offset + bucket * 7 + i) % list.length]!;
+      }
       if (crossPost) {
         const original = items[0]!;
         items.push({
@@ -812,12 +853,12 @@ export class MockSource implements SourceAdapter {
     };
   }
 
-  async fetchOpportunities(opts: { tenantId: string; query?: string; limit?: number; since?: Date }): Promise<RawOpportunity[]> {
+  async fetchOpportunities(opts: FetchOpportunitiesOptions): Promise<RawOpportunity[]> {
     const current = Math.floor(this.now().getTime() / BUCKET_MS);
     const limit = Math.min(MAX_BATCH, Math.max(1, opts.limit ?? MAX_BATCH));
     const out: RawOpportunity[] = [];
     for (let b = current; b > current - 24 && out.length < MIN_BATCH + 5; b--) {
-      out.push(...this.bucketItems(opts.tenantId, b));
+      out.push(...this.bucketItems(opts.tenantId, b, opts.weights));
     }
     // Newest first; cap to the batch size.
     const batch = out.slice(0, Math.min(limit, MAX_BATCH));

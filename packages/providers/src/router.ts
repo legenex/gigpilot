@@ -11,7 +11,7 @@ import { GrokProvider } from "./intelligence/grok";
 import { GxProvider } from "./intelligence/gx";
 import { MockIntelligenceProvider } from "./intelligence/mock";
 import { ProviderError } from "./lib/errors";
-import type { FallbackRecord, IntelligenceRouter, ProviderCallContext, RoutedIntelligenceResult } from "./types";
+import { NO_WEB_RESEARCH_NOTE, type FallbackRecord, type IntelligenceRouter, type ProviderCallContext, type RoutedIntelligenceResult } from "./types";
 
 /**
  * ModelRouter. Chooses an intelligence provider per task class, enforcing
@@ -218,11 +218,25 @@ export class ModelRouter implements IntelligenceRouter {
     return null;
   }
 
+  /**
+   * Research requests degrade to model knowledge when no web-search family answers: the
+   * request is re-issued WITHOUT `webSearch` (and `web_research` becomes `market_research`, a
+   * task GX supports on provided data) so local GX answers instead of the mock, and the
+   * result carries `webResearch.performed = false` for callers to label.
+   */
+  private static withoutWebSearch<T>(req: IntelligenceRequest<T>): IntelligenceRequest<T> {
+    return { ...req, webSearch: false, task: req.task === "web_research" ? "market_research" : req.task };
+  }
+
   async complete<T>(req: IntelligenceRequest<T>, ctx: ProviderCallContext): Promise<RoutedIntelligenceResult<T>> {
     const fallbacks: FallbackRecord[] = [];
     const order = this.routeFor(req.task, ctx);
     // Adapters resolve tenant-stored credentials from the request context.
     const request: IntelligenceRequest<T> = { ...req, context: { ...req.context, tenantId: req.context?.tenantId ?? ctx.tenantId ?? undefined } };
+    const wantsWeb = req.webSearch === true || req.task === "web_research";
+    const degraded = wantsWeb ? ModelRouter.withoutWebSearch(request) : request;
+    const webInfo = (family: IntelligenceFamily, sent: IntelligenceRequest<T>) =>
+      wantsWeb ? { requested: true, performed: family === "grok" && sent.webSearch === true, ...(family === "grok" && sent.webSearch === true ? {} : { note: NO_WEB_RESEARCH_NOTE }) } : undefined;
 
     for (const family of order) {
       if (req.signal?.aborted) throw new RoutingError(`${req.task} aborted`, [...fallbacks, { family, reason: "aborted by caller" }]);
@@ -231,7 +245,9 @@ export class ModelRouter implements IntelligenceRouter {
         fallbacks.push({ family, reason: "provider not registered" });
         continue;
       }
-      const skip = await this.skipReason(provider, request, ctx);
+      // Only a web-search family keeps the search request; everyone else answers from knowledge.
+      const sent = family === "grok" ? request : degraded;
+      const skip = await this.skipReason(provider, sent, ctx);
       if (skip) {
         fallbacks.push({ family, reason: skip });
         continue;
@@ -243,7 +259,7 @@ export class ModelRouter implements IntelligenceRouter {
       }
       let res: IntelligenceResult<T>;
       try {
-        res = await provider.complete(request);
+        res = await provider.complete(sent);
       } catch (err) {
         if (family !== "mock") {
           if (req.signal?.aborted) this.breaker.neutral(family);
@@ -262,8 +278,9 @@ export class ModelRouter implements IntelligenceRouter {
       }
       if (family !== "mock") this.breaker.success(family);
       try {
-        const data = this.validate(request, res);
-        return { ...res, data, fallbacks, paid: provider.paid };
+        const data = this.validate(sent, res);
+        const web = webInfo(family, sent);
+        return { ...res, data, fallbacks, paid: provider.paid, ...(web ? { webResearch: web } : {}) };
       } catch (err) {
         if (family === "mock") {
           throw new RoutingError(`All intelligence providers failed for ${req.task}: ${errorReason(err)}`, [

@@ -15,6 +15,13 @@
       "when": 1790449616452,
       "tag": "0001_reliability",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1790454558017,
+      "tag": "0002_product_integrity",
+      "breakpoints": true
     }
   ]
 }

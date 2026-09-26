@@ -14,7 +14,8 @@ export function formatUsd(n: number | null | undefined, opts: { cents?: boolean;
 
 export function formatPct(n: number | null | undefined, digits = 0): string {
   if (n === null || n === undefined || !Number.isFinite(n)) return "—";
-  return `${(n * 100).toFixed(digits)}%`;
+  const v = (n * 100).toFixed(digits);
+  return Number(v) < 0 ? `−${v.slice(1)}%` : `${v}%`;
 }
 
 export function formatCompact(n: number | null | undefined): string {

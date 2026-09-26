@@ -162,3 +162,144 @@ export function checkSrt(text: string): { cues: number; problems: string[] } {
   if (cues === 0) problems.push("no subtitle cues found");
   return { cues, problems };
 }
+
+// ---------------------------------------------------------------------------
+// Duplicate detection (QA deliverable uniqueness)
+// ---------------------------------------------------------------------------
+
+export interface PerceptualSignature {
+  /** "text" = visible text + canvas of a vector render (exact match); "ahash" = 64-bit average hash of a raster (Hamming ≤ 5). */
+  kind: "text" | "ahash";
+  value: string;
+}
+
+function decodeEntities(s: string): string {
+  return s.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&");
+}
+
+/**
+ * Cheap perceptual signature of an SVG: the visible text (headline, subhead, CTA, scene,
+ * shot captions) plus the canvas size, ignoring decorative randomness (background blobs,
+ * gradients), numbers (variant / timecode labels) and the mock watermark. Two renders with
+ * the same signature look the same to a client.
+ */
+export function svgSignature(svg: string): string {
+  const attrs = svgRootAttributes(svg);
+  const texts = [...svg.matchAll(/<text\b[^>]*>([\s\S]*?)<\/text>/gi)]
+    .map((m) => decodeEntities(m[1]!.replace(/<[^>]+>/g, " ")))
+    .map((t) => t.toLowerCase().replace(/[0-9]+/g, "").replace(/[^a-z\s]+/g, " ").replace(/\s+/g, " ").trim())
+    .filter((t) => t && !/mock render|mock storyboard|simulating/.test(t));
+  const canvas = `${attrs["data-frame-width"] ?? attrs.width ?? "?"}x${attrs["data-frame-height"] ?? attrs.height ?? "?"}`;
+  return `${canvas}|${texts.join("|")}`;
+}
+
+function paethPredictor(a: number, b: number, c: number): number {
+  const p = a + b - c;
+  const pa = Math.abs(p - a);
+  const pb = Math.abs(p - b);
+  const pc = Math.abs(p - c);
+  return pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+}
+
+/**
+ * 8×8 average hash of an 8-bit, non-interlaced PNG (grey, grey+alpha, RGB, RGBA). Returns
+ * null for formats it cannot decode cheaply (callers fall back to sha256 only).
+ */
+export function pngAverageHash(bytes: Uint8Array, inflate: (data: Uint8Array) => Uint8Array): string | null {
+  try {
+    if (bytes.length < 33 || bytes[0] !== 0x89 || bytes[1] !== 0x50) return null;
+    let o = 8;
+    let width = 0;
+    let height = 0;
+    let bitDepth = 0;
+    let colorType = 0;
+    let interlace = 0;
+    const idat: Uint8Array[] = [];
+    while (o + 8 <= bytes.length) {
+      const len = u32be(bytes, o);
+      const type = String.fromCharCode(bytes[o + 4]!, bytes[o + 5]!, bytes[o + 6]!, bytes[o + 7]!);
+      const data = bytes.subarray(o + 8, o + 8 + len);
+      if (type === "IHDR") {
+        width = u32be(data, 0);
+        height = u32be(data, 4);
+        bitDepth = data[8]!;
+        colorType = data[9]!;
+        interlace = data[12]!;
+      } else if (type === "IDAT") idat.push(data);
+      else if (type === "IEND") break;
+      o += 12 + len;
+    }
+    const channels = colorType === 0 ? 1 : colorType === 2 ? 3 : colorType === 4 ? 2 : colorType === 6 ? 4 : 0;
+    if (!width || !height || bitDepth !== 8 || interlace !== 0 || channels === 0 || width * height > 25_000_000) return null;
+    const joined = new Uint8Array(idat.reduce((a, d) => a + d.length, 0));
+    let p = 0;
+    for (const d of idat) {
+      joined.set(d, p);
+      p += d.length;
+    }
+    const raw = inflate(joined);
+    const stride = width * channels;
+    const prev = new Uint8Array(stride);
+    const cur = new Uint8Array(stride);
+    const sums = new Float64Array(64);
+    const counts = new Float64Array(64);
+    for (let y = 0; y < height; y++) {
+      const base = y * (stride + 1);
+      const filter = raw[base]!;
+      for (let x = 0; x < stride; x++) {
+        const v = raw[base + 1 + x]!;
+        const a = x >= channels ? cur[x - channels]! : 0;
+        const b = prev[x]!;
+        const c = x >= channels ? prev[x - channels]! : 0;
+        cur[x] = (filter === 0 ? v : filter === 1 ? v + a : filter === 2 ? v + b : filter === 3 ? v + ((a + b) >> 1) : v + paethPredictor(a, b, c)) & 0xff;
+      }
+      const cy = Math.min(7, Math.floor((y * 8) / height));
+      for (let x = 0; x < width; x++) {
+        const i = x * channels;
+        const grey = channels >= 3 ? 0.299 * cur[i]! + 0.587 * cur[i + 1]! + 0.114 * cur[i + 2]! : cur[i]!;
+        const cell = cy * 8 + Math.min(7, Math.floor((x * 8) / width));
+        sums[cell]! += grey;
+        counts[cell]! += 1;
+      }
+      prev.set(cur);
+    }
+    const cells = Array.from(sums, (s, i) => s / Math.max(1, counts[i]!));
+    const mean = cells.reduce((a, b) => a + b, 0) / 64;
+    let hex = "";
+    for (let i = 0; i < 64; i += 4) {
+      let nibble = 0;
+      for (let k = 0; k < 4; k++) if (cells[i + k]! > mean) nibble |= 1 << (3 - k);
+      hex += nibble.toString(16);
+    }
+    return hex;
+  } catch {
+    return null;
+  }
+}
+
+export function hammingHex(a: string, b: string): number {
+  let d = 0;
+  for (let i = 0; i < Math.min(a.length, b.length); i++) {
+    let x = parseInt(a[i]!, 16) ^ parseInt(b[i]!, 16);
+    while (x) {
+      d += x & 1;
+      x >>= 1;
+    }
+  }
+  return d + Math.abs(a.length - b.length) * 4;
+}
+
+export function perceptualSignature(bytes: Uint8Array, mime: string, inflate: (data: Uint8Array) => Uint8Array): PerceptualSignature | null {
+  if (mime === "image/svg+xml") return { kind: "text", value: svgSignature(new TextDecoder().decode(bytes)) };
+  if (mime === "image/png") {
+    const h = pngAverageHash(bytes, inflate);
+    return h ? { kind: "ahash", value: h } : null;
+  }
+  return null;
+}
+
+/** Same-looking deliverables: identical text signature, or raster hashes within Hamming 5. */
+export function sameLook(a: PerceptualSignature, b: PerceptualSignature): boolean {
+  if (a.kind !== b.kind) return false;
+  return a.kind === "text" ? a.value === b.value : hammingHex(a.value, b.value) <= 5;
+}

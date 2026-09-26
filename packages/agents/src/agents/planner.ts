@@ -16,6 +16,7 @@ import {
   type EconomicsBreakdown,
 } from "@gigpilot/db";
 import type { AgentDeps } from "../deps";
+import { detectRequestedFeatures } from "../heuristics/features";
 import { templateForFamily, type TemplateContext } from "../heuristics/workflows";
 import { notify } from "../lib/notify";
 import { money, quote, round4 } from "../lib/util";
@@ -89,6 +90,101 @@ function stepCostShare(step: WorkflowStepPlan, breakdown: EconomicsBreakdown | n
   return round4(total);
 }
 
+type ProductionEstimate = OpportunityAnalysis["productionEstimates"][number];
+
+export interface BatchAssignment {
+  /** Units this step must deliver (= generations it renders; ≤ maxGenerationsPerStep). */
+  units: number;
+  /** Global unit offset across all generate steps of the job (unique concept/variant per unit). */
+  unitOffset: number;
+  aspectRatio: string;
+  estimateLabel: string;
+  durationSec?: number;
+  batch: { index: number; of: number };
+}
+
+function distribute(total: number, parts: number): number[] {
+  const n = Math.max(1, parts);
+  return Array.from({ length: n }, (_, i) => Math.floor(total / n) + (i < total % n ? 1 : 0));
+}
+
+/**
+ * Expand creative batches so every contracted unit is produced exactly once:
+ *  - units of an estimate are split per requested aspect ratio (a "16:9 + 9:16" deliverable is
+ *    rendered in both formats),
+ *  - each batch renders ≤ maxGenerationsPerStep units (extra batches are cloned steps that the
+ *    downstream steps also depend on), at least one batch per template owner when there are
+ *    enough units (owners without units are dropped),
+ *  - every batch gets a global unit offset so batch B renders different concepts/variants than
+ *    batch A (never `concepts[i % n]` from zero again).
+ */
+export function expandCreativeBatches(
+  plan: WorkflowStepPlan[],
+  estimates: ProductionEstimate[],
+  maxPerStep: number,
+): { plan: WorkflowStepPlan[]; batches: Map<string, BatchAssignment> } {
+  const batches = new Map<string, BatchAssignment>();
+  const gen = plan.filter((s) => s.kind === "generate");
+  if (gen.length === 0) return { plan, batches };
+  const cap = Math.max(1, maxPerStep);
+  const estFor = (s: WorkflowStepPlan) => estimates.find((e) => e.label === s.estimateLabel) ?? estimates.find((e) => /^(image|video)\./.test(e.capability));
+  // Group owners by the estimate they render (plan order).
+  const groups = new Map<string, { est: ProductionEstimate | undefined; owners: WorkflowStepPlan[] }>();
+  for (const s of gen) {
+    const est = estFor(s);
+    const key = est?.label ?? s.estimateLabel ?? s.key;
+    const g = groups.get(key) ?? { est, owners: [] };
+    g.owners.push(s);
+    groups.set(key, g);
+  }
+  const extra = new Map<string, WorkflowStepPlan[]>(); // original key → cloned batch steps
+  const dropped = new Set<string>();
+  let offset = 0;
+  for (const [label, { est, owners }] of groups) {
+    const total = Math.max(0, Math.round(est?.units ?? 4));
+    const sourceLabel = est?.label ?? owners[0]!.name;
+    const aspects = [...new Set([...sourceLabel.matchAll(/\b(9:16|1:1|4:5|16:9|3:2)\b/g)].map((m) => m[1]!))];
+    const fallbackAspect = owners[0]!.capability?.startsWith("video.") ? "9:16" : "1:1";
+    const formats = aspects.length ? aspects : [fallbackAspect];
+    const perAspect = distribute(total, formats.length);
+    const chunks = perAspect.map((c) => (c > 0 ? Math.ceil(c / cap) : 0));
+    const wanted = Math.min(owners.length, total);
+    while (chunks.reduce((a, b) => a + b, 0) < wanted) {
+      // Add a batch to the aspect with the largest units-per-batch until each owner has work.
+      let best = -1;
+      for (let k = 0; k < perAspect.length; k++) if (perAspect[k]! > chunks[k]! && (best < 0 || perAspect[k]! / chunks[k]! > perAspect[best]! / chunks[best]!)) best = k;
+      if (best < 0) break;
+      chunks[best]!++;
+    }
+    const slots: { units: number; aspect: string }[] = [];
+    formats.forEach((aspect, k) => {
+      for (const units of distribute(perAspect[k]!, chunks[k]!)) if (units > 0) slots.push({ units, aspect });
+    });
+    const dur = /(\d{1,3})s\b/.exec(sourceLabel)?.[1];
+    slots.forEach((slot, idx) => {
+      const owner = owners[idx] ?? owners[owners.length - 1]!;
+      let key = owner.key;
+      if (idx >= owners.length) {
+        key = `${owner.key}_${idx - owners.length + 2}`;
+        const clone: WorkflowStepPlan = { ...owner, key, name: `${owner.name.replace(/ — batch [A-Z]$/, "")} — batch ${String.fromCharCode(65 + idx)}` };
+        extra.set(owner.key, [...(extra.get(owner.key) ?? []), clone]);
+      }
+      batches.set(key, { units: slot.units, unitOffset: offset, aspectRatio: slot.aspect, estimateLabel: label, ...(dur ? { durationSec: Number(dur) } : {}), batch: { index: idx + 1, of: slots.length } });
+      offset += slot.units;
+    });
+    for (const o of owners.slice(slots.length)) dropped.add(o.key);
+  }
+  const out: WorkflowStepPlan[] = [];
+  for (const s of plan) {
+    if (dropped.has(s.key)) continue;
+    const clones = extra.get(s.key) ?? [];
+    const rewire = (deps: string[]) => [...new Set(deps.flatMap((d) => (dropped.has(d) ? [] : [d, ...(extra.get(d) ?? []).map((c) => c.key)])))];
+    out.push({ ...s, dependsOn: rewire(s.dependsOn) });
+    for (const c of clones) out.push({ ...c, dependsOn: rewire(c.dependsOn) });
+  }
+  return { plan: out, batches };
+}
+
 /**
  * Production Planner: turns a won job into an executable workflow DAG with
  * per-step capabilities, dependencies, acceptance criteria, estimated cost
@@ -127,8 +223,12 @@ export async function runJobPlan(payload: QueuePayloads["job-plan"], deps: Agent
       const languages = parseLanguages(analysis, j.brief);
       const tmplCtx = { ...templateContextFromAnalysis(analysis), languages };
       const proposed = analysis?.proposedWorkflow;
-      const plan = isValidWorkflow(proposed) ? proposed : templateForFamily(family, tmplCtx);
+      const basePlan = isValidWorkflow(proposed) ? proposed : templateForFamily(family, tmplCtx);
       const source = isValidWorkflow(proposed) ? "analysis" : "template";
+      const expanded = expandCreativeBatches(basePlan, analysis?.productionEstimates ?? [], settings.limits.maxGenerationsPerStep);
+      const plan = expanded.plan;
+      // Per-feature acceptance criteria for code deliverables (checked by QA against the artifact).
+      const featureLabels = [...new Set([...(analysis?.requestedFeatures ?? []), ...(j.opportunityId ? detectRequestedFeatures(`${j.title}\n${analysis?.clientRequest ?? ""}\n${j.brief}`, family).map((f) => f.label) : [])])];
 
       let workflowId = existingWf?.id;
       if (!workflowId) {
@@ -139,7 +239,8 @@ export async function runJobPlan(payload: QueuePayloads["job-plan"], deps: Agent
       const existingSteps = await db.select({ key: workflowStep.key }).from(workflowStep).where(eq(workflowStep.workflowId, workflowId));
       const existingKeys = new Set(existingSteps.map((s) => s.key));
 
-      const defectTarget = demo ? PRODUCTION_KIND_BY_FAMILY[family] : undefined;
+      // Demo workspaces only (never live), and only when the tenant keeps demo.injectDefect on.
+      const defectTarget = demo && settings.demo.injectDefect ? PRODUCTION_KIND_BY_FAMILY[family] : undefined;
       const defectStepKey = defectTarget ? plan.find((s) => s.kind === defectTarget.kind)?.key : undefined;
       const estimates = analysis?.productionEstimates ?? [];
       const translateSteps = plan.filter((s) => s.kind === "translate");
@@ -153,17 +254,14 @@ export async function runJobPlan(payload: QueuePayloads["job-plan"], deps: Agent
         if (existingKeys.has(s.key)) continue;
         const input: Record<string, unknown> = { family, source };
         if (s.kind === "generate") {
-          const est = estimates.find((e) => e.label === s.estimateLabel) ?? estimates.find((e) => /^(image|video)\./.test(e.capability));
-          const owners = plan.filter((p) => p.kind === "generate" && (p.estimateLabel ?? "") === (s.estimateLabel ?? ""));
-          const idx = owners.findIndex((o) => o.key === s.key);
-          const total = est?.units ?? 4;
-          const share = owners.length > 1 ? (idx === 0 ? Math.ceil(total / owners.length) : Math.floor(total / owners.length)) : total;
-          input.units = Math.max(1, Math.min(settings.limits.maxGenerationsPerStep, share));
-          input.deliverableUnits = share;
-          input.aspectRatio = /(9:16|1:1|4:5|16:9|3:2)/.exec(est?.label ?? s.name)?.[1] ?? (s.capability?.startsWith("video.") ? "9:16" : "1:1");
-          const dur = /(\d{1,3})s\)/.exec(est?.label ?? "")?.[1];
-          if (dur) input.durationSec = Number(dur);
-          input.estimateLabel = est?.label ?? s.estimateLabel ?? s.name;
+          const b = expanded.batches.get(s.key);
+          input.units = b?.units ?? 1;
+          input.deliverableUnits = b?.units ?? 1;
+          input.unitOffset = b?.unitOffset ?? 0;
+          input.batch = b?.batch ?? { index: 1, of: 1 };
+          input.aspectRatio = b?.aspectRatio ?? (s.capability?.startsWith("video.") ? "9:16" : "1:1");
+          if (b?.durationSec) input.durationSec = b.durationSec;
+          input.estimateLabel = b?.estimateLabel ?? s.estimateLabel ?? s.name;
         }
         if (s.kind === "translate") {
           const idx = translateSteps.findIndex((x) => x.key === s.key);
@@ -172,7 +270,11 @@ export async function runJobPlan(payload: QueuePayloads["job-plan"], deps: Agent
           input.sourceItems = Math.min(4, sourceItems);
           input.deliverableSourceItems = sourceItems;
         }
-        if (defectStepKey === s.key && defectTarget) input.simulateDefect = defectTarget.defect;
+        if (defectStepKey === s.key && defectTarget) {
+          input.simulateDefect = defectTarget.defect;
+          input.demoDefect = true; // labelled everywhere: QA finding demo_injected_defect, repair + delivery notes
+        }
+        const acceptance = (s.kind === "code" || s.kind === "test") && featureLabels.length ? [...s.acceptance, ...featureLabels.map((f) => `Implements: ${f}`)] : s.acceptance;
         const estimatedCostUsd = stepCostShare(s, estimate?.breakdown ?? null, plan);
         estimatedTotal += estimatedCostUsd;
         await db.insert(workflowStep).values({
@@ -189,7 +291,7 @@ export async function runJobPlan(payload: QueuePayloads["job-plan"], deps: Agent
           attempts: 0,
           maxAttempts: s.agent === "qa" ? settings.limits.maxRepairsPerJob + 1 : settings.limits.maxStepAttempts,
           estimatedCostUsd,
-          acceptance: s.acceptance,
+          acceptance,
           input,
           position,
         });

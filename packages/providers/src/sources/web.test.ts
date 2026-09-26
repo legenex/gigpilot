@@ -111,10 +111,46 @@ describe("WebFeedSource", () => {
     expect(f.calls.filter((c) => c.url.includes("127.0.0.1") || c.url.includes("169.254") || c.url.includes("jobs.example.org"))).toHaveLength(1); // only the earlier allowed call
   });
 
-  it("health makes no network calls", async () => {
-    const h = await new WebFeedSource().health();
+  it("health: one cached HEAD reachability check (never a content fetch), or degraded 'not checked yet'", async () => {
+    let now = Date.parse("2026-09-26T00:00:00Z");
+    const notChecked = await new WebFeedSource({ now: () => now }).health({ check: false });
+    expect(notChecked.status).toBe("degraded");
+    expect(notChecked.detail).toMatch(/not checked yet/);
+    const f = mockFetch((url, call) => (url.hostname === "weworkremotely.com" && call.method === "HEAD" ? new Response(null, { status: 200 }) : new Response("nf", { status: 404 })));
+    const src = new WebFeedSource({ fetch: f, now: () => now });
+    const h = await src.health();
     expect(h.status).toBe("connected");
     expect(h.meta?.feeds).toHaveLength(4);
+    expect(f.calls).toHaveLength(1);
+    expect(f.calls[0]!.method).toBe("HEAD");
+    now += 59 * 60_000;
+    await src.health();
+    expect(f.calls).toHaveLength(1); // cached ≥ 60 min
+    now += 2 * 60_000;
+    await src.health();
+    expect(f.calls).toHaveLength(2);
+    resetWebFeedCache();
+    const down = await new WebFeedSource({ fetch: mockFetch(() => new Response("down", { status: 503 })), now: () => now }).health();
+    expect(down.status).toBe("degraded");
+  });
+
+  it("health after a real feed fetch reports connected without another request", async () => {
+    const f = feedServer();
+    const src = new WebFeedSource({ fetch: f, configLoader: async () => ({ feeds: ["remoteok"] }) });
+    await src.fetchOpportunities({ tenantId: "t" });
+    const calls = f.calls.length;
+    expect((await src.health()).status).toBe("connected");
+    expect(f.calls.length).toBe(calls);
+  });
+
+  it("splits the refresh limit across Market Lab weights by market keywords", async () => {
+    const f = feedServer();
+    const src = new WebFeedSource({ fetch: f, configLoader: async () => ({ feeds: ["wwr", "remotive", "hn", "remoteok"], contractOnly: false }) });
+    const all = await src.fetchOpportunities({ tenantId: "t" });
+    expect(all.length).toBeGreaterThan(2);
+    const weighted = await src.fetchOpportunities({ tenantId: "t", limit: 4, weights: [{ key: "ai-automation", weight: 75, keywords: ["automation"] }, { key: "research-content", weight: 25, keywords: ["account executive"] }] });
+    expect(weighted.filter((o) => (o.raw as { sourcedForMarket?: string }).sourcedForMarket === "ai-automation").length).toBe(3);
+    expect(weighted.filter((o) => (o.raw as { sourcedForMarket?: string }).sourcedForMarket === "research-content").length).toBe(1);
   });
 });
 

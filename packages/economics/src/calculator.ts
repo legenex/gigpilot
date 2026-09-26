@@ -28,6 +28,32 @@ export interface LineItemInput {
   quantity: number;
   attempts: number;
   priceSource: string;
+  /**
+   * Whether the priced route actually runs for the tenant (set by estimateOpportunity when
+   * route availability is known): available | local ($0 local compute/tooling) |
+   * simulated (no connected provider — priced at the catalog route the mock simulates) |
+   * unavailable (nothing can run it; the estimate is incomplete).
+   */
+  routeStatus?: "available" | "local" | "simulated" | "unavailable";
+  /** Provider/family the analysis asked for when the priced route was substituted. */
+  requestedProvider?: string | null;
+  /** Human-readable routing note. */
+  routeNote?: string;
+  /** Capability this line prices (production lines). */
+  capability?: string;
+}
+
+/** How one production unit type of an analysis is covered by the estimate. */
+export interface CoverageItem {
+  label: string;
+  capability: string;
+  units: number;
+  /** "inference" = delivered by model calls and priced through the inference lines ("priced via inference"). */
+  pricedVia: "creative" | "inference" | "local" | "unpriced";
+  provider: string | null;
+  model: string | null;
+  routeStatus: "available" | "local" | "simulated" | "unavailable";
+  note?: string;
 }
 
 export interface FeeSchedule {
@@ -45,6 +71,8 @@ export interface EconomicsInput {
   revision: { expectedRounds: number; costFraction: number };
   contingencyPct: number;
   shadow: { hours: number; hourlyRateUsd: number };
+  /** Extra reasons the estimate is incomplete (e.g. "no connected provider for audio.voiceover"). */
+  extraMissing?: string[];
 }
 
 export interface LineItemResult extends LineItemInput {
@@ -67,6 +95,8 @@ export interface EconomicsResult {
   breakEvenPriceUsd: number;
   complete: boolean;
   missing: string[];
+  /** Per production unit type coverage (set by estimateOpportunity). */
+  coverage?: CoverageItem[];
 }
 
 /** Round to cents for presentation-stable values (internal math stays full precision). */
@@ -125,6 +155,7 @@ export function breakEvenPrice(nonFeeCostsUsd: number, fee: FeeSchedule): number
 export function calculateEconomics(input: EconomicsInput): EconomicsResult {
   const missing: string[] = [];
   const price = resolvePrice(input.price);
+  for (const m of input.extraMissing ?? []) if (!missing.includes(m)) missing.push(m);
   missing.push(...price.missing);
 
   const lineItems: LineItemResult[] = input.lineItems.map((li) => {

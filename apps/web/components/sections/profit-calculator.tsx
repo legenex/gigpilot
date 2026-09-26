@@ -6,6 +6,7 @@ import { BUSINESS_DEFAULTS, PLATFORM_FEE_DEFAULTS } from "@gigpilot/config/defau
 import { calculateEconomics, scoreOpportunity, statedBudget } from "@gigpilot/economics";
 import { cn } from "@gigpilot/ui/lib/cn";
 import { formatPct, formatUsd } from "@gigpilot/ui/lib/format";
+import { RecChip } from "@gigpilot/ui/components/rec-chip";
 
 type Market = "upwork" | "freelancer" | "fiverr" | "contra" | "direct";
 
@@ -88,9 +89,15 @@ export function ProfitCalculator({ presets }: { presets: Preset[] }) {
       <div className="flex flex-wrap items-center gap-x-4 gap-y-3 border-b border-line px-4 py-3 sm:px-5">
         <div>
           <span className="text-[14px] font-semibold text-fg">Economics</span>
-          <span className="ml-2.5 font-mono text-[11px] text-fg-muted">calculateEconomics() · deterministic</span>
+          <span className="ml-2.5 font-mono text-[11px] text-fg-muted">
+            <span className="hidden sm:inline">calculateEconomics() · </span>deterministic
+          </span>
         </div>
-        <div role="group" aria-label="Load an example" className="flex flex-wrap gap-1 sm:ml-auto">
+        <div
+          role="group"
+          aria-label="Load an example"
+          className="-mx-1 flex w-full snap-x flex-nowrap gap-1 overflow-x-auto [scrollbar-width:none] sm:mx-0 sm:ml-auto sm:w-auto"
+        >
           {presets.map((p) => (
             <button
               key={p.id}
@@ -98,7 +105,7 @@ export function ProfitCalculator({ presets }: { presets: Preset[] }) {
               onClick={() => apply(p)}
               aria-pressed={preset === p.id}
               className={cn(
-                "focus-ring rounded-xs px-2 py-1 text-[12px] transition-colors",
+                "focus-ring shrink-0 snap-start whitespace-nowrap rounded-xs px-2 py-1 text-[12px] transition-colors",
                 preset === p.id ? "bg-surface-2 text-fg ring-1 ring-inset ring-line-strong" : "text-fg-muted hover:text-fg",
               )}
             >
@@ -158,12 +165,14 @@ export function ProfitCalculator({ presets }: { presets: Preset[] }) {
               <legend className="flex w-full items-baseline justify-between text-[13px] text-fg-2">
                 Marketplace <span className="tnum font-mono text-[12px] text-fg">{feeLabel(market)}</span>
               </legend>
-              <div className="mt-2.5 grid grid-cols-5 gap-px overflow-hidden rounded-sm bg-line ring-1 ring-line">
-                {MARKETS.map((m) => (
+              {/* Phones: 3 + 2 on a 6-track grid so "Freelancer" never gets squeezed; one row of five from `sm`. */}
+              <div className="mt-2.5 grid grid-cols-6 gap-px overflow-hidden rounded-sm bg-line ring-1 ring-line sm:grid-cols-5">
+                {MARKETS.map((m, i) => (
                   <label
                     key={m.key}
                     className={cn(
-                      "relative cursor-pointer py-2 text-center text-[12px] transition-colors has-[:focus-visible]:outline has-[:focus-visible]:outline-2 has-[:focus-visible]:-outline-offset-2 has-[:focus-visible]:outline-accent",
+                      "relative cursor-pointer py-2.5 text-center text-[13px] transition-colors sm:col-span-1 sm:py-2 sm:text-[12px] has-[:focus-visible]:outline has-[:focus-visible]:outline-2 has-[:focus-visible]:-outline-offset-2 has-[:focus-visible]:outline-accent",
+                      i < 3 ? "col-span-2" : "col-span-3",
                       market === m.key ? "bg-surface-3 text-fg" : "bg-bg-raised text-fg-muted hover:text-fg",
                     )}
                   >
@@ -194,7 +203,7 @@ export function ProfitCalculator({ presets }: { presets: Preset[] }) {
         <div className="p-4 sm:p-6 lg:col-span-7" aria-live="polite">
           <div className="flex items-center justify-between">
             <p className="label">Output · money the calculator computes</p>
-            <span className="font-mono text-[10.5px] uppercase tracking-[0.07em] text-fg-muted">same inputs → same answer</span>
+            <span className="hidden font-mono text-[11px] uppercase tracking-[0.05em] text-fg-muted sm:inline">same inputs → same answer</span>
           </div>
 
           {/* Price decomposition with the margin gate marked */}
@@ -217,7 +226,7 @@ export function ProfitCalculator({ presets }: { presets: Preset[] }) {
             </div>
             <div className="relative mt-1.5 h-4">
               <span
-                className="absolute -translate-x-1/2 whitespace-nowrap font-mono text-[10px] uppercase tracking-[0.07em] text-fg-2"
+                className="absolute -translate-x-1/2 whitespace-nowrap font-mono text-[11px] uppercase tracking-[0.05em] text-fg-2"
                 style={{ left: `${(1 - T.minGrossMargin) * 100}%` }}
               >
                 {formatPct(T.minGrossMargin)} margin gate
@@ -253,19 +262,10 @@ export function ProfitCalculator({ presets }: { presets: Preset[] }) {
               <Gate label={`Profit ≥ ${formatUsd(T.minExpectedProfitUsd)}`} pass={score.gates.profit.pass} />
               <Gate label={`Budget ≥ ${formatUsd(T.preferredMinBudgetUsd)}`} pass={score.gates.budget.pass} soft />
             </ul>
-            <div className="flex items-center gap-3">
+            <p className="flex items-center gap-3">
               <span className="label">Recommendation</span>
-              <span
-                className={cn(
-                  "inline-flex h-8 min-w-[104px] items-center justify-center rounded-sm px-3 font-mono text-[12px] font-medium uppercase tracking-[0.08em] ring-1 ring-inset transition-colors duration-200",
-                  rec === "pursue" && "bg-accent text-[#1a0a02] ring-accent",
-                  rec === "consider" && "bg-warn-wash text-warn ring-warn/30",
-                  rec === "skip" && "bg-surface-2 text-fg-2 ring-line-strong",
-                )}
-              >
-                {rec}
-              </span>
-            </div>
+              <RecChip rec={rec} />
+            </p>
           </div>
           <p className="mt-3 min-h-[36px] text-[12.5px] leading-[18px] text-fg-muted">{score.reasons.join(". ")}.</p>
         </div>
@@ -335,7 +335,7 @@ function Line({ k, v, strong }: { k: string; v: string; strong?: boolean }) {
 function Stat({ k, v, tone, className }: { k: string; v: string; tone?: "profit" | "risk"; className?: string }) {
   return (
     <div className={cn("bg-bg-raised px-3.5 py-3", className)}>
-      <dt className="font-mono text-[10px] uppercase tracking-[0.07em] text-fg-muted">{k}</dt>
+      <dt className="font-mono text-[11px] uppercase tracking-[0.05em] text-fg-muted">{k}</dt>
       <dd className={cn("mt-1 font-display text-[22px] font-semibold tracking-[-0.02em]", tone === "profit" ? "text-profit" : tone === "risk" ? "text-risk" : "text-fg")}>
         {v}
       </dd>

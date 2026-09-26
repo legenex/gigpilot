@@ -43,7 +43,16 @@ export interface RoutedIntelligenceResult<T> extends IntelligenceResult<T> {
   fallbacks: FallbackRecord[];
   /** true when the answering provider bills real money. */
   paid: boolean;
+  /**
+   * Present when the request asked for live web research (`webSearch` or a research task):
+   * `performed` is true only when a web-search provider (Grok) answered with search enabled.
+   * Otherwise the answer is model knowledge only and callers must label it with `note`.
+   */
+  webResearch?: { requested: boolean; performed: boolean; note?: string };
 }
+
+/** Label for outputs of research tasks answered without a web-search provider. */
+export const NO_WEB_RESEARCH_NOTE = "no live web research (model knowledge only)";
 
 export interface IntelligenceRouter {
   complete<T>(req: IntelligenceRequest<T>, ctx: ProviderCallContext): Promise<RoutedIntelligenceResult<T>>;

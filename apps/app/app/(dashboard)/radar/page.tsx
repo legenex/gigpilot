@@ -7,6 +7,7 @@ import { RadarWorkspace } from "@/components/radar/radar-workspace";
 import { nowMs } from "@/lib/format";
 import { getOpportunityDetail } from "@/lib/queries/opportunity";
 import { getRadar, parseRadarFilters } from "@/lib/queries/radar";
+import { getTenantMeta } from "@/lib/queries/tenant";
 import { requireSession } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
@@ -25,18 +26,18 @@ export default async function RadarPage({ searchParams }: { searchParams: Promis
     filters.dir = typeof sp.dir === "string" ? filters.dir : "asc";
     data = await getRadar(ctx.tenantId, filters);
   }
-  const detail = await detailP;
+  const [detail, meta] = await Promise.all([detailP, getTenantMeta(ctx.tenantId)]);
   const sources = data.sources.length;
   return (
     <div className="page">
       <PageHeader
-        eyebrow="Opportunity Radar"
-        title="Every opportunity, priced before you look"
-        description={`${data.counts.all} opportunities from ${sources} source${sources === 1 ? "" : "s"} · ${data.counts.pursue} clear your profit and margin gates · deterministic economics, no invented prices`}
+        title="Opportunity Radar"
+        tagline="Every opportunity, priced before you look"
+        description={`${data.counts.all} opportunities from ${sources} source${sources === 1 ? "" : "s"} · ${data.counts.pursue} clear your profit and margin gates`}
         actions={
           <>
             <PasteButton />
-            <RefreshSourcesButton variant="primary" />
+            <RefreshSourcesButton variant="secondary" />
           </>
         }
       />
@@ -48,6 +49,7 @@ export default async function RadarPage({ searchParams }: { searchParams: Promis
         sources={data.sources}
         filters={filters}
         nowMs={nowMs()}
+        sampleBefore={meta.createdAt.toISOString()}
         pane={detail ? <OpportunityPane d={detail} /> : filters.sel ? <p className="text-[13px] text-fg-3">This opportunity no longer exists or belongs to another workspace.</p> : null}
       />
     </div>

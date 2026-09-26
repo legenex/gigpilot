@@ -185,7 +185,7 @@ export function MenuItem({
 }
 
 export function MenuLabel({ children }: { children: ReactNode }) {
-  return <RMenu.Label className="px-2 pb-1 pt-1.5 font-mono text-[10.5px] uppercase tracking-[0.06em] text-fg-3">{children}</RMenu.Label>;
+  return <RMenu.Label className="px-2 pb-1 pt-1.5 font-mono text-[11px] uppercase tracking-[0.06em] text-fg-3">{children}</RMenu.Label>;
 }
 
 export function MenuSeparator() {

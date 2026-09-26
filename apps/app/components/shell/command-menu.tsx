@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { ClipboardPaste, FileText, PanelLeft, RefreshCw, SquareKanban } from "lucide-react";
 import { CommandPalette, Kbd, useToast, type CommandGroupDef } from "@gigpilot/ui";
+import { refreshToast } from "@/components/actions/refresh-sources-button";
 import { refreshAllSourcesAction } from "@/lib/actions/integrations";
 import { NAV } from "./nav";
 
@@ -88,7 +89,7 @@ export function CommandMenu({
             onSelect: async () => {
               close();
               const res = await refreshAllSourcesAction();
-              toast(res.ok ? { title: `Refresh queued for ${res.data?.count ?? 0} enabled source${res.data?.count === 1 ? "" : "s"}`, tone: "success" } : { title: res.error, tone: "error" });
+              toast(res.ok ? { ...refreshToast(res.data), tone: res.data && res.data.queued > 0 ? "success" : "info" } : { title: res.error, tone: "error" });
             },
           },
           {

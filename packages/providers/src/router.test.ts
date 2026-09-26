@@ -129,4 +129,34 @@ describe("ModelRouter", () => {
     expect(a.usage.costUsd).toBe(0);
     await expect(r.complete({ task: "summarise", messages: [], schema }, noPaid)).rejects.toThrow(/mockResult/);
   });
+
+  it("research without a web-search provider runs on GX with webSearch off and is labelled (never silently mock)", async () => {
+    // GX refuses web_research and any request that asks for web search (like the real adapter).
+    class NoWebGx extends FakeProvider {
+      override supports(task: IntelligenceTask): boolean {
+        return task !== "web_research";
+      }
+      override async complete<T>(r: IntelligenceRequest<T>): Promise<IntelligenceResult<T>> {
+        if (r.webSearch) throw new Error("GX has no web search");
+        return super.complete(r);
+      }
+    }
+    const gx = new NoWebGx("gx", false);
+    const grok = new FakeProvider("grok", true, { configured: false });
+    const r = new ModelRouter([gx, grok, new MockIntelligenceProvider()]);
+    const res = await r.complete(req("web_research", { webSearch: true }), noPaid);
+    expect(res.family).toBe("gx");
+    expect(res.webResearch).toEqual({ requested: true, performed: false, note: "no live web research (model knowledge only)" });
+    const market = await r.complete(req("market_research", { webSearch: true }), noPaid);
+    expect(market.family).toBe("gx");
+    expect(market.webResearch?.performed).toBe(false);
+    // With Grok available and paid spend allowed, the search is performed and not labelled.
+    const grokOn = new FakeProvider("grok", true, { cost: 0.01 });
+    const r2 = new ModelRouter([gx, grokOn, new MockIntelligenceProvider()]);
+    const live = await r2.complete(req("web_research", { webSearch: true }), paid(1));
+    expect(live.family).toBe("grok");
+    expect(live.webResearch).toEqual({ requested: true, performed: true });
+    // Non-research requests carry no webResearch marker.
+    expect((await r.complete(req("triage"), noPaid)).webResearch).toBeUndefined();
+  });
 });

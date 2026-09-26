@@ -25,6 +25,18 @@ type NodeRef = { type: NonNullable<Hover["type"]>; idx: number };
 
 const SOURCE_WEIGHTS = [1.6, 1.2, 0.8, 0.8, 1.4, 0.6];
 
+/**
+ * Illustrative opening tally. The counters render these on the server, keep
+ * them under reduced motion, and add the live simulation on top otherwise —
+ * so the instrument never reads "0 / $0".
+ */
+function baselineTally(jobs: PilotCoreProps["jobs"]) {
+  const delivered = 12;
+  let profit = 0;
+  for (let i = 0; i < delivered; i++) profit += jobs[i % Math.max(1, jobs.length)]?.profitUsd ?? 0;
+  return { scanned: 1286, shortlisted: 19, repaired: 4, delivered, profit };
+}
+
 function readPalette(el: HTMLElement): Palette {
   const cs = getComputedStyle(el);
   const v = (name: string, fb: string) => cs.getPropertyValue(name).trim() || fb;
@@ -50,7 +62,8 @@ export function PilotCore({ sources, stations, orchestrator, recovery, market, j
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const engineRef = useRef<PilotCoreEngine | null>(null);
   const statRefs = useRef<Record<string, HTMLSpanElement | null>>({});
-  const profitRef = useRef(0);
+  const base = useMemo(() => baselineTally(jobs), [jobs]);
+  const profitRef = useRef(base.profit);
   const serialRef = useRef(412);
   const drawRef = useRef<() => void>(() => {});
   const [layout, setLayout] = useState<Layout | null>(null);
@@ -126,10 +139,10 @@ export function PilotCore({ sources, stations, orchestrator, recovery, market, j
         if (now - lastStats < 200) return;
         lastStats = now;
         const r = statRefs.current;
-        if (r.scanned) r.scanned.textContent = s.scanned.toLocaleString("en-US");
-        if (r.shortlisted) r.shortlisted.textContent = String(s.shortlisted);
-        if (r.delivered) r.delivered.textContent = String(s.delivered);
-        if (r.repaired) r.repaired.textContent = String(s.repaired);
+        if (r.scanned) r.scanned.textContent = (base.scanned + s.scanned).toLocaleString("en-US");
+        if (r.shortlisted) r.shortlisted.textContent = String(base.shortlisted + s.shortlisted);
+        if (r.delivered) r.delivered.textContent = String(base.delivered + s.delivered);
+        if (r.repaired) r.repaired.textContent = String(base.repaired + s.repaired);
       },
     });
 
@@ -209,7 +222,7 @@ export function PilotCore({ sources, stations, orchestrator, recovery, market, j
       window.removeEventListener("resize", onResize);
       drawRef.current = () => {};
     };
-  }, [layout, reduced, onDeliver]);
+  }, [layout, reduced, onDeliver, base]);
 
   // Keep the engine's hover in sync (drives path highlighting).
   useEffect(() => {
@@ -315,14 +328,14 @@ export function PilotCore({ sources, stations, orchestrator, recovery, market, j
                     <span
                       aria-hidden
                       className={cn(
-                        "pointer-events-auto absolute whitespace-nowrap font-mono text-[10.5px] uppercase leading-[14px] tracking-[0.08em] transition-colors duration-150",
+                        "pointer-events-auto absolute whitespace-nowrap font-mono text-[11px] uppercase leading-[14px] tracking-[0.07em] transition-colors duration-150",
                         n.ref.type === "station" ? "text-fg-2" : "text-fg-muted",
                         isActive && "text-fg",
                       )}
                       style={n.labelStyle}
                     >
                       {n.label}
-                      {n.sub && <span className="block text-[9.5px] tracking-[0.06em] text-fg-muted group-hover/node:text-fg-muted">{n.sub}</span>}
+                      {n.sub && <span className="block text-[11px] tracking-[0.04em] text-fg-muted"> {n.sub}</span>}
                     </span>
                   )}
                 </button>
@@ -333,10 +346,10 @@ export function PilotCore({ sources, stations, orchestrator, recovery, market, j
           {layout && (
             <span
               aria-hidden
-              className="pointer-events-none absolute whitespace-nowrap font-mono text-[10px] uppercase tracking-[0.1em] text-fg-muted"
+              className="pointer-events-none absolute whitespace-nowrap font-mono text-[11px] uppercase tracking-[0.08em] text-fg-muted"
               style={learnLabelStyle(layout)}
             >
-              Learn ← outcomes re-weight sourcing
+              Learn ← outcomes inform sourcing
             </span>
           )}
 
@@ -348,10 +361,10 @@ export function PilotCore({ sources, stations, orchestrator, recovery, market, j
               className="pointer-events-none absolute z-20 w-[248px] rounded-md bg-surface-2/95 p-3 shadow-3 ring-1 ring-line-strong"
               style={tooltipStyle(activeNode, layout)}
             >
-              <p className="font-mono text-[10px] uppercase tracking-[0.08em] text-fg-muted">{activeNode.tag}</p>
+              <p className="font-mono text-[11px] uppercase tracking-[0.06em] text-fg-muted">{activeNode.tag}</p>
               <p className="mt-1 text-[13px] font-semibold text-fg">{activeNode.title}</p>
               <p className="mt-1 text-[12px] leading-[17px] text-fg-2">{activeNode.body}</p>
-              {activeNode.hint && <p className="mt-2 font-mono text-[10px] uppercase tracking-[0.08em] text-accent-hi">{activeNode.hint}</p>}
+              {activeNode.hint && <p className="mt-2 font-mono text-[11px] uppercase tracking-[0.06em] text-accent-hi">{activeNode.hint}</p>}
             </div>
           )}
 
@@ -368,15 +381,16 @@ export function PilotCore({ sources, stations, orchestrator, recovery, market, j
               {ticker.slice(0, layout?.mode === "tall" ? 3 : 4).map((t, i) => (
                 <li
                   key={t.serial}
-                  className={cn("border-t border-line py-2.5", i === 3 && "opacity-40")}
+                  // The oldest entry fades by colour, not opacity, so it keeps ≥ 4.5:1 contrast.
+                  className="border-t border-line py-2.5"
                   style={t.fresh && !reduced ? { animation: "site-ticker-in 560ms var(--gp-ease-out) both" } : undefined}
                 >
                   <div className="flex items-baseline justify-between gap-3">
-                    <span className="truncate text-[13px] font-medium text-fg">{t.title}</span>
-                    <span className="font-mono text-[10px] tracking-[0.06em] text-fg-muted">{t.serial}</span>
+                    <span className={cn("truncate text-[13px] font-medium", i === 3 ? "text-fg-muted" : "text-fg")}>{t.title}</span>
+                    <span className="font-mono text-[11px] tracking-[0.04em] text-fg-muted">{t.serial}</span>
                   </div>
-                  <p className="tnum mt-0.5 text-[12px] text-fg-2">
-                    <span className="text-profit">{formatUsd(t.profitUsd)} profit</span>
+                  <p className={cn("tnum mt-0.5 text-[12px]", i === 3 ? "text-fg-muted" : "text-fg-2")}>
+                    <span className={i === 3 ? undefined : "text-profit"}>{formatUsd(t.profitUsd)} profit</span>
                     <span className="text-fg-muted"> · </span>
                     {formatPct(t.margin)} margin
                   </p>
@@ -387,19 +401,19 @@ export function PilotCore({ sources, stations, orchestrator, recovery, market, j
         </div>
       </div>
 
-      {/* Telemetry: counts are what this simulation has done since the page opened */}
+      {/* Telemetry: an illustrative tally, advanced by the simulation while it runs */}
       <div className="mt-2 grid grid-cols-2 gap-x-6 gap-y-4 border-t border-line pt-4 sm:grid-cols-3 lg:grid-cols-[auto_repeat(5,minmax(0,1fr))] lg:items-end">
         <p className="label col-span-2 sm:col-span-3 lg:col-span-1 lg:pr-4">
-          Since you arrived
-          <span className="block normal-case tracking-normal text-fg-muted">simulated · illustrative</span>
+          Simulated run
+          <span className="block normal-case tracking-normal text-fg-muted">illustrative · not live data</span>
         </p>
         {(
           [
-            ["scanned", "Signals scanned", "0"],
-            ["shortlisted", "Shortlisted", "0"],
-            ["repaired", "QA repairs", "0"],
-            ["delivered", "Delivered", "0"],
-            ["profit", "Profit booked", "$0"],
+            ["scanned", "Signals scanned", base.scanned.toLocaleString("en-US")],
+            ["shortlisted", "Shortlisted", String(base.shortlisted)],
+            ["repaired", "QA repairs", String(base.repaired)],
+            ["delivered", "Delivered", String(base.delivered)],
+            ["profit", "Profit booked", formatUsd(base.profit)],
           ] as const
         ).map(([k, label, init]) => (
           <div key={k}>
@@ -480,8 +494,14 @@ function buildNodes(
       y: p.y,
       label: wide ? s.label : s.short,
       sub: wide ? s.mode : undefined,
-      labelStyle: wide ? { right: 30, top: 16, transform: "translateY(-50%)", textAlign: "right" } : { left: 16, top: 26, transform: "translateX(-50%)" },
-      aria: `Source: ${s.label}, ${s.mode}`,
+      // Tall layout: names alternate below/above their node so full names fit at phone width.
+      labelStyle: wide
+        ? { right: 30, top: 16, transform: "translateY(-50%)", textAlign: "right" }
+        : i % 2 === 0
+          ? { left: 16, top: 26, transform: "translateX(-50%)" }
+          : { left: 16, bottom: 26, transform: "translateX(-50%)" },
+      // Starts with the visible label text so the accessible name contains what sighted users read.
+      aria: `${s.label} ${s.mode} source`,
       tag: `Source · ${s.mode}`,
       title: s.label,
       body: s.detail,

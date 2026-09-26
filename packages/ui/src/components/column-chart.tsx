@@ -86,7 +86,10 @@ export function ColumnChart({
   const colW = Math.max(3, Math.min(24, band * 0.62));
   const ticks = [0, 0.25, 0.5, 0.75, 1].map((f) => f * max);
   const y = (v: number) => padT + plotH - (v / max) * plotH;
+  // Narrow charts label only the first and last day; wider ones thin ticks to ~56px apart.
+  const narrow = width < 480;
   const tickEvery = Math.max(1, Math.ceil(data.length / Math.max(2, Math.floor(plotW / 56))));
+  const showTick = (i: number) => (narrow ? i === 0 || i === data.length - 1 : i % tickEvery === 0);
   const hasData = totals.some((t) => t > 0);
 
   return (
@@ -106,7 +109,7 @@ export function ColumnChart({
           {ticks.map((t, i) => (
             <g key={i}>
               <line x1={padL} x2={width - padR} y1={y(t)} y2={y(t)} stroke="var(--gp-line)" strokeWidth={1} />
-              <text x={padL - 8} y={y(t)} dy="0.32em" textAnchor="end" className="fill-fg-3 font-mono text-[10px] tabular">
+              <text x={padL - 8} y={y(t)} dy="0.32em" textAnchor="end" className="fill-fg-3 font-mono text-[11px] tabular">
                 {format(t)}
               </text>
             </g>
@@ -134,8 +137,8 @@ export function ColumnChart({
                     : `M${x},${yy + h}V${yy}H${x + colW}V${yy + h}Z`;
                   return <path key={s.key} d={path} fill={s.color} opacity={hover === null || hover === i ? 1 : 0.45} className="transition-opacity duration-150" />;
                 })}
-                {i % tickEvery === 0 ? (
-                  <text x={cx} y={height - 6} textAnchor="middle" className="fill-fg-3 font-mono text-[10px]">
+                {showTick(i) ? (
+                  <text x={narrow ? (i === 0 ? padL : width - padR) : cx} y={height - 6} textAnchor={narrow ? (i === 0 ? "start" : "end") : "middle"} className="fill-fg-3 font-mono text-[11px]">
                     {d.tick ?? d.label}
                   </text>
                 ) : null}

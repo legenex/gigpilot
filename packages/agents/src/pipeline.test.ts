@@ -26,7 +26,7 @@ import {
 import { getStorage } from "@gigpilot/providers";
 import { approveFinalDelivery, approveOpportunity, approveProposal } from "./commands";
 import { handlers } from "./handlers";
-import { captureCommandQueue, createTestTenant, drain, migrateTestDb, resetDb, testDeps } from "./testing/harness";
+import { captureCommandQueue, createTestTenant, drain, migrateTestDb, mockCanDeliver, resetDb, testDeps } from "./testing/harness";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function count(table: any, where: ReturnType<typeof eq> | undefined): Promise<number> {
@@ -72,11 +72,23 @@ describe("full opportunity-to-delivery pipeline (mock mode)", () => {
     await drain(deps);
     const analysed = await db.select().from(opportunity).where(eq(opportunity.tenantId, t.tenantId));
     expect(analysed.filter((o) => o.status === "new" || o.status === "analysing")).toHaveLength(0);
+    // Only deep analysis (refinement) may recommend pursuit — triage-only rows are at most "consider".
     const pursue = analysed.filter((o) => o.recommendation === "pursue");
     expect(pursue.length).toBeGreaterThanOrEqual(3);
     expect(analysed.some((o) => o.recommendation === "skip")).toBe(true);
+    const refinedIds = new Set(
+      (await db.select().from(agentEvent).where(and(eq(agentEvent.tenantId, t.tenantId), eq(agentEvent.type, "opportunity.analysed"))))
+        .filter((e) => (e.data as Record<string, unknown>).refined === true)
+        .map((e) => e.subjectId),
+    );
+    expect(pursue.every((o) => refinedIds.has(o.id))).toBe(true);
 
-    const best = [...pursue].sort((a, b) => (b.expectedProfitUsd ?? 0) - (a.expectedProfitUsd ?? 0))[0]!;
+    // Pick the most profitable candidate the deterministic pipeline can honestly deliver
+    // (e.g. a RAG assistant or a brief that requires tests escalates to the owner instead).
+    const deliverable = [];
+    for (const o of pursue) if (await mockCanDeliver(o)) deliverable.push(o);
+    expect(deliverable.length).toBeGreaterThan(0);
+    const best = [...deliverable].sort((a, b) => (b.expectedProfitUsd ?? 0) - (a.expectedProfitUsd ?? 0))[0]!;
     expect(best.status).toBe("shortlisted");
     expect(best.expectedProfitUsd!).toBeGreaterThanOrEqual(300);
     expect(best.expectedMargin!).toBeGreaterThanOrEqual(0.5);
@@ -114,7 +126,11 @@ describe("full opportunity-to-delivery pipeline (mock mode)", () => {
     const [zipAsset] = await db.select().from(asset).where(eq(asset.id, pkg!.packageAssetId!));
     const zip = unzipSync(await getStorage().get(zipAsset!.storageKey));
     expect(Object.keys(zip)).toEqual(expect.arrayContaining(["MANIFEST.md", "DELIVERY-NOTES.md", "QA-SUMMARY.md"]));
-    expect(strFromU8(zip["QA-SUMMARY.md"]!)).toContain("PASS");
+    const qaMd = strFromU8(zip["QA-SUMMARY.md"]!);
+    expect(qaMd).toContain("## Verified deterministically");
+    expect(qaMd).toContain("## Not verified");
+    expect(qaMd).not.toMatch(/\bPASS\b/); // QA outcomes are never presented as test results
+    expect(qaMd).toMatch(/simulated defect was injected \(demo mode\) and repaired/);
     expect(Object.keys(zip).length).toBeGreaterThan(5);
 
     // 4) Owner approves the final delivery.

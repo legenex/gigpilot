@@ -3,6 +3,7 @@ import { getDb, getTenantSettings, sql } from "@gigpilot/db";
 import type { TenantSettings } from "@gigpilot/contracts";
 import { pausedStepsSummary } from "../job-blockers";
 import { OWNER_BLOCK_REASONS_SQL } from "./jobs";
+import { sampleCutoffSql } from "./tenant";
 
 type Row = Record<string, unknown>;
 async function q<T extends Row>(query: ReturnType<typeof sql>): Promise<T[]> {
@@ -31,58 +32,74 @@ export interface CommandCenterData {
     proposalsAwaiting: number;
     activeJobs: number;
     awaitingFinal: number;
-    jobs30d: number;
+    /** Won applications (paid jobs) since the workspace was created, within its first 30 days. */
+    paidJobsFirst30: number;
   };
+  /** Workspace creation time and how far into its first 30 days it is. */
+  workspace: { createdAt: Date; day: number };
   pipeline: { valueUsd: number; profitUsd: number; count: number; inProductionUsd: number };
-  spend: { todayPaid: number; todaySim: number; d30Paid: number; d30Sim: number; revenue30d: number };
+  spend: { todayPaid: number; todaySim: number; d14Paid: number; d14Sim: number; d30Paid: number; d30Sim: number; revenue30d: number };
   accuracy: { jobs: number; meanAbsErr: number | null; withinTarget: number };
   touchpoints: { jobs: number; touches: number };
   daily: { day: string; discovered: number; viable: number; spend: number }[];
   funnel: { key: string; label: string; value: number }[];
   agents: { agent: string; runs: number; running: number; failed: number; costUsd: number; lastAt: Date | null }[];
-  notifications: { id: string; kind: string; title: string; body: string; link: string | null; createdAt: Date; read: boolean }[];
+  notifications: { id: string; kind: string; title: string; body: string; link: string | null; createdAt: Date; read: boolean; sample: boolean }[];
   production: { id: string; title: string; status: string; done: number; total: number; running: number; actualCostUsd: number; spendLimitUsd: number; dueAt: Date | null }[];
   needsYou: NeedsYouItem[];
 }
 
 export async function getCommandCenter(tenantId: string): Promise<CommandCenterData> {
   const t = tenantId;
+  // Seeded sample history (created before the workspace) never counts toward KPIs, goals or totals.
+  const cut = sampleCutoffSql(t);
   const [settings, counts, pipeline, spend, accuracy, touch, daily, funnel, agents, notifs, production, proposals, deliveries, pursue, submits, blocked] = await Promise.all([
     getTenantSettings(getDb(), t),
     q(sql`
       select
-        (select count(*) from opportunity where tenant_id = ${t} and created_at > now() - interval '24 hours' and duplicate_of_id is null)::int as opps24h,
-        (select count(*) from opportunity where tenant_id = ${t} and created_at > now() - interval '24 hours' and estimate_complete and recommendation in ('pursue','consider'))::int as viable24h,
-        (select count(*) from opportunity where tenant_id = ${t} and created_at > now() - interval '24 hours' and recommendation = 'pursue')::int as pursue24h,
-        (select count(*) from opportunity where tenant_id = ${t} and created_at > now() - interval '7 days' and estimate_complete and recommendation in ('pursue','consider'))::float8 / 7 as viable7d,
-        (select count(*) from opportunity where tenant_id = ${t} and status = 'shortlisted')::int as shortlisted,
-        (select count(*) from proposal where tenant_id = ${t} and status = 'awaiting_approval')::int as props,
-        (select count(*) from job where tenant_id = ${t} and status in ('intake','planning','awaiting_inputs','ready','executing','qa','repairing'))::int as active,
-        (select count(*) from job where tenant_id = ${t} and status = 'awaiting_final_approval')::int as finals,
-        (select count(*) from job where tenant_id = ${t} and created_at > now() - interval '30 days' and status <> 'cancelled')::int as jobs30d
+        (select count(*) from opportunity where tenant_id = ${t} and created_at >= ${cut} and created_at > now() - interval '24 hours' and duplicate_of_id is null)::int as opps24h,
+        (select count(*) from opportunity where tenant_id = ${t} and created_at >= ${cut} and created_at > now() - interval '24 hours' and estimate_complete and recommendation in ('pursue','consider'))::int as viable24h,
+        (select count(*) from opportunity where tenant_id = ${t} and created_at >= ${cut} and created_at > now() - interval '24 hours' and recommendation = 'pursue')::int as pursue24h,
+        (select count(*) from opportunity where tenant_id = ${t} and created_at >= ${cut} and created_at > now() - interval '7 days' and estimate_complete and recommendation in ('pursue','consider'))::float8
+          / greatest(1, least(7, ceil(extract(epoch from now() - ${cut}) / 86400)))::float8 as viable7d,
+        (select count(*) from opportunity where tenant_id = ${t} and created_at >= ${cut} and status = 'shortlisted')::int as shortlisted,
+        (select count(*) from proposal where tenant_id = ${t} and created_at >= ${cut} and status = 'awaiting_approval')::int as props,
+        (select count(*) from job where tenant_id = ${t} and created_at >= ${cut} and status in ('intake','planning','awaiting_inputs','ready','executing','qa','repairing'))::int as active,
+        (select count(*) from job where tenant_id = ${t} and created_at >= ${cut} and status = 'awaiting_final_approval')::int as finals,
+        (select count(*) from application a where a.tenant_id = ${t} and a.status = 'won' and a.created_at >= ${cut}
+          and coalesce(a.decided_at, a.updated_at) < ${cut} + interval '30 days')::int as paid30,
+        ${cut} as created_at
     `),
     q(sql`
       select coalesce(sum(price_usd),0)::float8 as value, coalesce(sum(expected_profit_usd),0)::float8 as profit, count(*)::int as n,
-        (select coalesce(sum(price_usd),0) from job where tenant_id = ${t} and status in ('intake','planning','awaiting_inputs','ready','executing','qa','repairing','awaiting_final_approval'))::float8 as inprod
-      from opportunity where tenant_id = ${t} and status in ('shortlisted','pursuing','applied')
+        (select coalesce(sum(price_usd),0) from job where tenant_id = ${t} and created_at >= ${cut} and status in ('intake','planning','awaiting_inputs','ready','executing','qa','repairing','awaiting_final_approval'))::float8 as inprod
+      from opportunity where tenant_id = ${t} and created_at >= ${cut} and status in ('shortlisted','pursuing','applied')
     `),
     q(sql`
       select
         coalesce(sum(amount_usd) filter (where paid and created_at >= date_trunc('day', now()) and category in ('inference','creative','tool','subcontractor')),0)::float8 as today_paid,
         coalesce(sum(amount_usd) filter (where not paid and created_at >= date_trunc('day', now()) and category in ('inference','creative','tool','subcontractor')),0)::float8 as today_sim,
+        coalesce(sum(amount_usd) filter (where paid and created_at >= date_trunc('day', now()) - interval '13 days' and category in ('inference','creative','tool','subcontractor')),0)::float8 as d14_paid,
+        coalesce(sum(amount_usd) filter (where not paid and created_at >= date_trunc('day', now()) - interval '13 days' and category in ('inference','creative','tool','subcontractor')),0)::float8 as d14_sim,
         coalesce(sum(amount_usd) filter (where paid and created_at > now() - interval '30 days' and category in ('inference','creative','tool','subcontractor')),0)::float8 as d30_paid,
         coalesce(sum(amount_usd) filter (where not paid and created_at > now() - interval '30 days' and category in ('inference','creative','tool','subcontractor')),0)::float8 as d30_sim,
         coalesce(sum(amount_usd) filter (where category = 'revenue' and created_at > now() - interval '30 days'),0)::float8 as revenue30d
-      from cost_ledger_entry where tenant_id = ${t} and kind = 'actual'
+      from cost_ledger_entry where tenant_id = ${t} and kind = 'actual' and created_at >= ${cut}
+    `),
+    // Relative error per completed job, $0 jobs included: est 0 & act 0 → 0%, est 0 & act > 0 → 100%.
+    q(sql`
+      with e as (
+        select case
+          when estimated_cost_usd > 0 then abs(actual_cost_usd - estimated_cost_usd) / estimated_cost_usd
+          when actual_cost_usd > 0 then 1.0
+          else 0.0 end as err
+        from job where tenant_id = ${t} and created_at >= ${cut} and status in ('awaiting_final_approval','delivered','closed')
+      )
+      select count(*)::int as jobs, avg(err)::float8 as mae, coalesce(array_agg(err::float8), '{}') as errs
+      from e
     `),
     q(sql`
-      select count(*)::int as jobs,
-        avg(abs(actual_cost_usd - estimated_cost_usd) / nullif(estimated_cost_usd,0))::float8 as mae,
-        count(*) filter (where abs(actual_cost_usd - estimated_cost_usd) / nullif(estimated_cost_usd,0) <= 0.2)::int as within
-      from job where tenant_id = ${t} and estimated_cost_usd > 0 and actual_cost_usd > 0 and status in ('awaiting_final_approval','delivered','closed')
-    `),
-    q(sql`
-      with j as (select id, opportunity_id, application_id from job where tenant_id = ${t} and created_at > now() - interval '30 days' and status <> 'cancelled'),
+      with j as (select id, opportunity_id, application_id from job where tenant_id = ${t} and created_at >= ${cut} and created_at > now() - interval '30 days' and status <> 'cancelled'),
       subj as (
         select j.id as job_id, j.id as sid from j
         union all select j.id, j.opportunity_id from j where j.opportunity_id is not null
@@ -91,19 +108,19 @@ export async function getCommandCenter(tenantId: string): Promise<CommandCenterD
         union all select j.id, d.id from j join delivery d on d.job_id = j.id
       )
       select (select count(*) from j)::int as jobs, count(a.id)::int as touches
-      from subj s join audit_event a on a.subject_id = s.sid and a.actor_type = 'user' and a.tenant_id = ${t}
+      from subj s join audit_event a on a.subject_id = s.sid and a.actor_type = 'user' and a.tenant_id = ${t} and a.created_at >= ${cut}
         and (a.action like '%.transition' or a.action = 'proposal.edited')
     `),
     q(sql`
       with days as (select generate_series(date_trunc('day', now()) - interval '13 days', date_trunc('day', now()), interval '1 day') as d)
       select to_char(days.d, 'YYYY-MM-DD') as day,
-        (select count(*) from opportunity o where o.tenant_id = ${t} and o.created_at >= days.d and o.created_at < days.d + interval '1 day')::int as discovered,
-        (select count(*) from opportunity o where o.tenant_id = ${t} and o.created_at >= days.d and o.created_at < days.d + interval '1 day' and o.estimate_complete and o.recommendation in ('pursue','consider'))::int as viable,
-        (select coalesce(sum(amount_usd),0) from cost_ledger_entry c where c.tenant_id = ${t} and c.kind = 'actual' and c.category in ('inference','creative','tool','subcontractor') and c.created_at >= days.d and c.created_at < days.d + interval '1 day')::float8 as spend
+        (select count(*) from opportunity o where o.tenant_id = ${t} and o.created_at >= ${cut} and o.created_at >= days.d and o.created_at < days.d + interval '1 day')::int as discovered,
+        (select count(*) from opportunity o where o.tenant_id = ${t} and o.created_at >= ${cut} and o.created_at >= days.d and o.created_at < days.d + interval '1 day' and o.estimate_complete and o.recommendation in ('pursue','consider'))::int as viable,
+        (select coalesce(sum(amount_usd),0) from cost_ledger_entry c where c.tenant_id = ${t} and c.created_at >= ${cut} and c.kind = 'actual' and c.category in ('inference','creative','tool','subcontractor') and c.created_at >= days.d and c.created_at < days.d + interval '1 day')::float8 as spend
       from days order by days.d
     `),
     q(sql`
-      with o as (select id, recommendation from opportunity where tenant_id = ${t} and created_at > now() - interval '30 days')
+      with o as (select id, recommendation from opportunity where tenant_id = ${t} and created_at >= ${cut} and created_at > now() - interval '30 days')
       select
         (select count(*) from o)::int as discovered,
         (select count(*) from o where recommendation is not null)::int as analysed,
@@ -119,12 +136,12 @@ export async function getCommandCenter(tenantId: string): Promise<CommandCenterD
         count(*) filter (where status = 'failed')::int as failed,
         coalesce(sum(cost_usd),0)::float8 as cost,
         max(coalesce(finished_at, started_at, created_at)) as last_at
-      from agent_run where tenant_id = ${t} and created_at > now() - interval '24 hours'
+      from agent_run where tenant_id = ${t} and created_at >= ${cut} and created_at > now() - interval '24 hours'
       group by agent order by count(*) filter (where status = 'running') desc, count(*) desc
     `),
     q(sql`
-      select id, kind, title, body, link, created_at, read_at from notification where tenant_id = ${t}
-      order by (read_at is null) desc, created_at desc limit 6
+      select id, kind, title, body, link, created_at, read_at, (coalesce(dedupe_key like 'demo-seed:%', false) or created_at < ${cut}) as sample from notification where tenant_id = ${t}
+      order by (read_at is null and coalesce(dedupe_key not like 'demo-seed:%', true) and created_at >= ${cut}) desc, created_at desc limit 6
     `),
     q(sql`
       select j.id, j.title, j.status, j.actual_cost_usd::float8 as actual, j.spend_limit_usd::float8 as lim, j.due_at,
@@ -137,20 +154,20 @@ export async function getCommandCenter(tenantId: string): Promise<CommandCenterD
     q(sql`
       select p.id, p.opportunity_id, p.price_usd::float8 as price, p.timeline_days, p.updated_at, o.title, o.source_key
       from proposal p join opportunity o on o.id = p.opportunity_id
-      where p.tenant_id = ${t} and p.status = 'awaiting_approval' order by p.updated_at desc limit 5
+      where p.tenant_id = ${t} and p.created_at >= ${cut} and p.status = 'awaiting_approval' order by p.updated_at desc limit 5
     `),
     q(sql`
       select j.id, j.title, j.price_usd::float8 as price, j.updated_at from job j
-      where j.tenant_id = ${t} and j.status = 'awaiting_final_approval' order by j.updated_at desc limit 5
+      where j.tenant_id = ${t} and j.created_at >= ${cut} and j.status = 'awaiting_final_approval' order by j.updated_at desc limit 5
     `),
     q(sql`
       select id, title, source_key, expected_profit_usd::float8 as profit, expected_margin as margin, created_at from opportunity
-      where tenant_id = ${t} and recommendation = 'pursue' and status in ('analysed','shortlisted')
+      where tenant_id = ${t} and created_at >= ${cut} and recommendation = 'pursue' and status in ('analysed','shortlisted')
       order by expected_profit_usd desc nulls last limit 3
     `),
     q(sql`
       select a.id, a.price_usd::float8 as price, a.updated_at, o.title, o.source_key from application a join opportunity o on o.id = a.opportunity_id
-      where a.tenant_id = ${t} and a.status = 'approved' and a.submission_mode <> 'api' order by a.updated_at desc limit 3
+      where a.tenant_id = ${t} and a.created_at >= ${cut} and a.status = 'approved' and a.submission_mode <> 'api' order by a.updated_at desc limit 3
     `),
     // Dead-end production states that only the owner can clear (confirm inputs / authorise attempt / raise spend limit).
     q(sql`
@@ -158,7 +175,7 @@ export async function getCommandCenter(tenantId: string): Promise<CommandCenterD
         (select count(*) from workflow_step s where s.job_id = j.id and s.status = 'blocked' and s.output->>'blockedReason' in ${OWNER_BLOCK_REASONS_SQL})::int as owner_blocked,
         (select string_agg(distinct s.output->>'blockedReason', ',') from workflow_step s where s.job_id = j.id and s.status = 'blocked' and s.output->>'blockedReason' in ${OWNER_BLOCK_REASONS_SQL}) as reasons
       from job j
-      where j.tenant_id = ${t} and j.status in ('awaiting_inputs','ready','executing','qa','repairing')
+      where j.tenant_id = ${t} and j.created_at >= ${cut} and j.status in ('awaiting_inputs','ready','executing','qa','repairing')
         and (j.status = 'awaiting_inputs' or exists (
           select 1 from workflow_step s where s.job_id = j.id and s.status = 'blocked' and s.output->>'blockedReason' in ${OWNER_BLOCK_REASONS_SQL}
         ))
@@ -231,17 +248,27 @@ export async function getCommandCenter(tenantId: string): Promise<CommandCenterD
       proposalsAwaiting: n(c.props),
       activeJobs: n(c.active),
       awaitingFinal: n(c.finals),
-      jobs30d: n(c.jobs30d),
+      paidJobsFirst30: n(c.paid30),
     },
+    workspace: (() => {
+      const createdAt = c.created_at ? new Date(c.created_at as string) : new Date();
+      return { createdAt, day: Math.max(1, Math.ceil((Date.now() - createdAt.getTime()) / 86_400_000)) };
+    })(),
     pipeline: { valueUsd: n(pipeline[0]?.value), profitUsd: n(pipeline[0]?.profit), count: n(pipeline[0]?.n), inProductionUsd: n(pipeline[0]?.inprod) },
     spend: {
       todayPaid: n(spend[0]?.today_paid),
       todaySim: n(spend[0]?.today_sim),
+      d14Paid: n(spend[0]?.d14_paid),
+      d14Sim: n(spend[0]?.d14_sim),
       d30Paid: n(spend[0]?.d30_paid),
       d30Sim: n(spend[0]?.d30_sim),
       revenue30d: n(spend[0]?.revenue30d),
     },
-    accuracy: { jobs: n(accuracy[0]?.jobs), meanAbsErr: accuracy[0]?.mae === null || accuracy[0]?.mae === undefined ? null : n(accuracy[0]?.mae), withinTarget: n(accuracy[0]?.within) },
+    accuracy: {
+      jobs: n(accuracy[0]?.jobs),
+      meanAbsErr: accuracy[0]?.mae === null || accuracy[0]?.mae === undefined ? null : n(accuracy[0]?.mae),
+      withinTarget: ((accuracy[0]?.errs as number[] | null) ?? []).filter((e) => Number(e) <= settings.goals.costEstimateAccuracyPct / 100 + 1e-9).length,
+    },
     touchpoints: { jobs: n(touch[0]?.jobs), touches: n(touch[0]?.touches) },
     daily: daily.map((r) => ({ day: String(r.day), discovered: n(r.discovered), viable: n(r.viable), spend: n(r.spend) })),
     funnel: [
@@ -269,6 +296,7 @@ export async function getCommandCenter(tenantId: string): Promise<CommandCenterD
       link: (r.link as string | null) ?? null,
       createdAt: new Date(r.created_at as string),
       read: Boolean(r.read_at),
+      sample: Boolean(r.sample),
     })),
     production: production.map((r) => ({
       id: String(r.id),

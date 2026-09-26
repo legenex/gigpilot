@@ -2,18 +2,23 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Check, Minus, X } from "lucide-react";
-import { Badge } from "@gigpilot/ui/components/badge";
+import { RecChip } from "@gigpilot/ui/components/rec-chip";
 import { cn } from "@gigpilot/ui/lib/cn";
 import { formatPct, formatUsd } from "@gigpilot/ui/lib/format";
 import type { RadarRow } from "@/lib/demo-data";
 
 const VISIBLE = 7;
 const ROW_H = 52;
-const REC: Record<RadarRow["recommendation"], { tone: "accent" | "warn" | "neutral"; label: string }> = {
-  pursue: { tone: "accent", label: "Pursue" },
-  consider: { tone: "warn", label: "Consider" },
-  skip: { tone: "neutral", label: "Skip" },
-};
+const COLS =
+  "[grid-template-columns:minmax(0,1fr)_64px_76px] sm:[grid-template-columns:minmax(0,1fr)_76px_80px] md:[grid-template-columns:minmax(0,1fr)_92px_72px_80px_64px_86px]";
+
+type Filter = "all" | RadarRow["recommendation"];
+const FILTERS: { key: Filter; label: string }[] = [
+  { key: "all", label: "All" },
+  { key: "pursue", label: "Pursue" },
+  { key: "consider", label: "Consider" },
+  { key: "skip", label: "Skip" },
+];
 
 type Slot = { row: RadarRow; analysing: boolean; fresh: boolean };
 
@@ -25,6 +30,8 @@ export function RadarTable({ rows, thresholds }: { rows: RadarRow[]; thresholds:
   const follow = useRef(true);
   const idle = useRef<number>(0);
   const root = useRef<HTMLDivElement>(null);
+  const [filter, setFilter] = useState<Filter>("all");
+  const filterRef = useRef<Filter>("all");
 
   useEffect(() => {
     visibleIds.current = slots.map((s) => s.row.id);
@@ -38,7 +45,8 @@ export function RadarTable({ rows, thresholds }: { rows: RadarRow[]; thresholds:
     let timer = 0;
     let resolve = 0;
     const tick = () => {
-      if (!visible || document.hidden) return;
+      // The stream only runs on the unfiltered queue; a filter freezes the demo on its matches.
+      if (!visible || document.hidden || filterRef.current !== "all") return;
       let next: RadarRow | undefined;
       for (let k = 0; k < rows.length && !next; k++) {
         const candidate = rows[cursor.current % rows.length];
@@ -73,8 +81,23 @@ export function RadarTable({ rows, thresholds }: { rows: RadarRow[]; thresholds:
     idle.current = window.setTimeout(() => (follow.current = true), 9000);
   };
 
-  const current = slots.find((s) => s.row.id === selected && !s.analysing)?.row ?? slots.find((s) => !s.analysing)?.row ?? rows[0]!;
+  const applyFilter = (f: Filter) => {
+    filterRef.current = f;
+    setFilter(f);
+    follow.current = f === "all";
+  };
+
+  const shown: Slot[] =
+    filter === "all"
+      ? slots
+      : rows
+          .filter((r) => r.recommendation === filter)
+          .slice(0, VISIBLE)
+          .map((row) => ({ row, analysing: false, fresh: false }));
+  const current = shown.find((s) => s.row.id === selected && !s.analysing)?.row ?? shown.find((s) => !s.analysing)?.row ?? rows[0]!;
   const pursue = slots.filter((s) => !s.analysing && s.row.recommendation === "pursue").length;
+  const counts = { all: rows.length, pursue: 0, consider: 0, skip: 0 } as Record<Filter, number>;
+  for (const r of rows) counts[r.recommendation]++;
 
   return (
     <div ref={root} className="product-frame reveal overflow-hidden">
@@ -84,30 +107,37 @@ export function RadarTable({ rows, thresholds }: { rows: RadarRow[]; thresholds:
           <span className="text-[14px] font-semibold text-fg">Radar</span>
           <span className="tnum rounded-xs bg-surface-2 px-1.5 py-0.5 font-mono text-[11px] text-fg-2">27 viable today</span>
         </div>
-        <div className="hidden items-center gap-1 md:flex" aria-hidden>
-          {["All sources", "Pursue", "Consider", "Skip"].map((f, i) => (
-            <span key={f} className={cn("rounded-xs px-2 py-1 text-[12px]", i === 0 ? "bg-surface-2 text-fg ring-1 ring-inset ring-line-strong" : "text-fg-muted")}>
-              {f}
-            </span>
-          ))}
-        </div>
-        <p className="ml-auto flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.06em] text-fg-muted">
+        <p className="ml-auto flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.06em] text-fg-muted md:order-last">
           <span className="inline-block size-1.5 animate-pulse-dot rounded-full bg-profit text-profit" aria-hidden />
           <span className="hidden sm:inline">Sources polled every 30 min ·</span> {pursue} pursue
         </p>
+        <div role="group" aria-label="Filter the demo queue by recommendation" className="-mx-1 flex w-full items-center gap-1 md:mx-0 md:w-auto">
+          {FILTERS.map((f) => (
+            <button
+              key={f.key}
+              type="button"
+              aria-pressed={filter === f.key}
+              onClick={() => applyFilter(f.key)}
+              className={cn(
+                "focus-ring inline-flex h-7 items-center gap-1.5 rounded-xs px-2 text-[12px] transition-colors",
+                filter === f.key ? "bg-surface-2 text-fg ring-1 ring-inset ring-line-strong" : "text-fg-muted hover:bg-surface-1 hover:text-fg",
+              )}
+            >
+              {f.label}
+              <span className="tnum font-mono text-[11px] text-fg-muted">{counts[f.key]}</span>
+            </button>
+          ))}
+        </div>
       </div>
 
       <div className="grid xl:grid-cols-[minmax(0,1fr)_340px]">
         {/* table */}
-        <div role="table" aria-label="Opportunity Radar (illustrative)" aria-rowcount={VISIBLE + 1} className="min-w-0">
+        <div role="table" aria-label="Opportunity Radar (illustrative)" aria-rowcount={shown.length + 1} className="relative min-w-0">
           <div role="rowgroup">
             <div
               role="row"
-              className="grid h-9 items-center gap-x-3 border-b border-line px-4 font-mono text-[10.5px] uppercase tracking-[0.07em] text-fg-muted sm:px-5 [grid-template-columns:minmax(0,1fr)_64px_76px] sm:[grid-template-columns:40px_minmax(0,1fr)_76px_80px] md:[grid-template-columns:44px_minmax(0,1fr)_92px_72px_80px_64px_86px]"
+              className={cn("grid h-9 items-center gap-x-3 border-b border-line px-4 font-mono text-[11px] uppercase tracking-[0.06em] text-fg-muted sm:px-5", COLS)}
             >
-              <span role="columnheader" className="hidden sm:block">
-                Src
-              </span>
               <span role="columnheader">Opportunity</span>
               <span role="columnheader" className="hidden text-right md:block">
                 Budget
@@ -127,10 +157,15 @@ export function RadarTable({ rows, thresholds }: { rows: RadarRow[]; thresholds:
             </div>
           </div>
           <div role="rowgroup" className="relative overflow-hidden" style={{ height: VISIBLE * ROW_H }}>
-            {slots.map((s, i) => (
+            {shown.map((s, i) => (
               <Row key={s.row.id} slot={s} index={i} selected={s.row.id === current.id} onPick={pick} thresholds={thresholds} />
             ))}
           </div>
+          {filter !== "all" && (
+            <p aria-hidden className="absolute inset-x-0 px-4 py-3 font-mono text-[11px] uppercase tracking-[0.06em] text-fg-muted sm:px-5" style={{ top: 36 + shown.length * ROW_H }}>
+              {shown.length} of {rows.length} demo opportunities · {FILTERS.find((f) => f.key === filter)?.label.toLowerCase()}
+            </p>
+          )}
         </div>
 
         {/* detail */}
@@ -154,7 +189,6 @@ function Row({
   thresholds: { margin: number; profit: number };
 }) {
   const { row: r, analysing, fresh } = slot;
-  const rec = REC[r.recommendation];
   return (
     <div
       role="row"
@@ -164,7 +198,7 @@ function Row({
       onFocus={() => !analysing && onPick(r.id)}
       className={cn(
         "absolute inset-x-0 grid cursor-default items-center gap-x-3 border-b border-line px-4 outline-none transition-[transform,background-color] duration-500 ease-out focus-visible:bg-surface-2 sm:px-5",
-        "[grid-template-columns:minmax(0,1fr)_64px_76px] sm:[grid-template-columns:40px_minmax(0,1fr)_76px_80px] md:[grid-template-columns:44px_minmax(0,1fr)_92px_72px_80px_64px_86px]",
+        COLS,
         selected ? "bg-surface-1" : "hover:bg-surface-1/60",
       )}
       style={{
@@ -174,13 +208,10 @@ function Row({
       }}
     >
       {selected && <span aria-hidden className="absolute inset-y-0 left-0 w-[2px] bg-accent" />}
-      <span role="cell" className="hidden font-mono text-[11px] tracking-[0.06em] text-fg-2 sm:block">
-        {r.source.short}
-      </span>
       <span role="cell" className="min-w-0">
         <span className="line-clamp-2 text-[13px] font-medium leading-4 text-fg sm:line-clamp-none sm:block sm:truncate sm:leading-5">{r.title}</span>
         <span className="hidden truncate text-[11.5px] text-fg-muted sm:block">
-          {r.family} · {r.posted} ago
+          <span className="text-fg-2">{r.source.label}</span> · {r.family} · {r.posted} ago
         </span>
       </span>
       <span role="cell" className="tnum hidden text-right font-mono text-[12px] text-fg-2 md:block">
@@ -209,15 +240,7 @@ function Row({
         )}
       </span>
       <span role="cell" className="flex justify-end">
-        {analysing ? (
-          <Badge tone="info" mono>
-            Analysing
-          </Badge>
-        ) : (
-          <Badge tone={rec.tone} mono>
-            {rec.label}
-          </Badge>
-        )}
+        <RecChip rec={analysing ? null : r.recommendation} pending="analysing" />
       </span>
     </div>
   );
@@ -234,7 +257,6 @@ function GateMark({ pass, soft }: { pass: boolean; soft?: boolean }) {
 }
 
 function Detail({ row: r, thresholds }: { row: RadarRow; thresholds: { margin: number; profit: number; budget: number } }) {
-  const rec = REC[r.recommendation];
   const ledger: [string, number, string?][] = [
     ["Price", r.priceUsd],
     ["Production + inference", -r.fulfilmentUsd],
@@ -248,9 +270,7 @@ function Detail({ row: r, thresholds }: { row: RadarRow; thresholds: { margin: n
         <span className="font-mono text-[11px] uppercase tracking-[0.07em] text-fg-muted">
           {r.source.label} · {r.source.mode}
         </span>
-        <Badge tone={rec.tone} mono>
-          {rec.label}
-        </Badge>
+        <RecChip rec={r.recommendation} />
       </div>
       <p className="mt-2 text-[14px] font-semibold leading-5 text-fg">{r.title}</p>
       <ul className="mt-3 space-y-1">
@@ -283,11 +303,11 @@ function Detail({ row: r, thresholds }: { row: RadarRow; thresholds: { margin: n
         ].map((g) => (
           <div key={g.k} className="bg-bg-raised px-2.5 py-2">
             <div className="flex items-center justify-between">
-              <span className="font-mono text-[10px] uppercase tracking-[0.07em] text-fg-muted">{g.k}</span>
+              <span className="font-mono text-[11px] uppercase tracking-[0.05em] text-fg-muted">{g.k}</span>
               <GateMark pass={g.pass} soft={g.soft} />
             </div>
             <p className="tnum mt-1 truncate font-mono text-[12px] text-fg">{g.v}</p>
-            <p className="truncate font-mono text-[10px] text-fg-muted">{g.t}</p>
+            <p className="truncate font-mono text-[11px] text-fg-muted">{g.t}</p>
           </div>
         ))}
       </div>

@@ -3,12 +3,12 @@
 @source "../../../packages/ui/src";
 
 /*
- * Dashboard-only refinements. DESIGN.md's fg-3 (#676C75) measures ~3.8:1 on
- * graphite; the cockpit uses small tertiary text heavily, so it is lifted to
- * clear WCAG AA 4.5:1 on bg and surface-2.
+ * Dashboard-only refinements. The cockpit uses small tertiary text heavily,
+ * so fg-3 is lifted to clear WCAG AA 4.5:1 on every surface up to surface-3
+ * (#878C95 on #1C1F25 ≈ 4.9:1; on bg ≈ 5.9:1).
  */
 :root {
-  --gp-fg-3: #80858e;
+  --gp-fg-3: #878c95;
 }
 
 @layer base {
@@ -53,10 +53,23 @@
     font-variant-numeric: tabular-nums;
     font-feature-settings: "tnum", "cv11";
   }
+  /* Fresh stream rows: a brief wash that fades out (static under reduced motion). */
+  .gp-arrival {
+    animation: gp-arrival 1.6s var(--gp-ease-out) both;
+  }
   .scrollbar-none {
     scrollbar-width: none;
   }
   .scrollbar-none::-webkit-scrollbar {
     display: none;
+  }
+}
+
+@keyframes gp-arrival {
+  from {
+    background-color: rgba(255, 255, 255, 0.045);
+  }
+  to {
+    background-color: transparent;
   }
 }

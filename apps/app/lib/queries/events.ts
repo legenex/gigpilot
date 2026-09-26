@@ -1,5 +1,6 @@
 import "server-only";
-import { agentEvent, and, desc, eq, getDb, gt, asc, lte, or, sql } from "@gigpilot/db";
+import { agentEvent, and, desc, eq, getDb, gt, asc, inArray, lte, not, or, sql } from "@gigpilot/db";
+import { SYSTEM_EVENT_TYPES } from "../labels";
 
 type SQL = ReturnType<typeof eq>;
 import type { LiveEvent } from "../live-types";
@@ -19,9 +20,14 @@ function toLive(r: typeof agentEvent.$inferSelect): LiveEvent {
   };
 }
 
-/** Most recent events for a tenant (newest first), optionally scoped to a subject/job. */
-export async function listRecentEvents(tenantId: string, opts: { limit?: number; subjectIds?: string[]; jobId?: string } = {}): Promise<LiveEvent[]> {
+/**
+ * Most recent events for a tenant (newest first), optionally scoped to a
+ * subject/job. Owner views pass `includeSystem: false` (default) so provider
+ * health and queue plumbing don't crowd out business events.
+ */
+export async function listRecentEvents(tenantId: string, opts: { limit?: number; subjectIds?: string[]; jobId?: string; includeSystem?: boolean } = {}): Promise<LiveEvent[]> {
   const conds: SQL[] = [eq(agentEvent.tenantId, tenantId)];
+  if (!opts.includeSystem) conds.push(not(inArray(agentEvent.type, [...SYSTEM_EVENT_TYPES])));
   const scoped: SQL[] = [];
   for (const id of opts.subjectIds ?? []) scoped.push(eq(agentEvent.subjectId, id));
   if (opts.jobId) scoped.push(eq(agentEvent.jobId, opts.jobId));

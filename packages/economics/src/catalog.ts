@@ -73,3 +73,22 @@ export function unitsFor(option: CreativeModelOption, durationSec = 8): number {
   if (option.unit === "minute") return durationSec / 60;
   return 1;
 }
+
+/** Default length of one generated clip when the catalog note does not state it (seconds). */
+export const DEFAULT_CLIP_SECONDS = 8;
+
+/** Clip length of a per-clip route (from its catalog note, e.g. "~8s clip"). */
+export function clipSecondsOf(option: CreativeModelOption): number {
+  const m = /~?\s*(\d{1,3})\s*s\s*clip/i.exec(option.notes ?? "");
+  const n = m ? Number(m[1]) : DEFAULT_CLIP_SECONDS;
+  return n > 0 ? n : DEFAULT_CLIP_SECONDS;
+}
+
+/**
+ * Billable units for ONE finished deliverable of `durationSec` (estimation): per-clip routes
+ * need ceil(duration / clip length) clips, so a 60s explainer is never priced as one 8s clip.
+ */
+export function deliverableUnitsFor(option: CreativeModelOption, durationSec?: number): number {
+  if (option.unit === "clip" && durationSec !== undefined && durationSec > 0) return Math.max(1, Math.ceil(durationSec / clipSecondsOf(option)));
+  return unitsFor(option, durationSec);
+}

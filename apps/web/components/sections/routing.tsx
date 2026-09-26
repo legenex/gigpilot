@@ -8,15 +8,15 @@ export function RoutingSection() {
       <SectionIntro
         id="routing-title"
         title="The right model for each task. The cheapest route that clears the bar."
-        lead="Cheap, repetitive work runs on the local GX cluster at zero marginal cost. Reasoning goes through Factory's router. Live research goes to Grok. Creative work goes to a broker that ranks Kie.ai and Higgsfield routes by cost per usable asset — not sticker price."
+        lead="Cheap, repetitive work runs on local models on the GX10 cluster at zero marginal cost. Reasoning and code can route through Factory Router, which runs in an isolated sandbox when enabled. Live web research uses xAI Grok when it is connected. Creative work goes to a broker that ranks Kie.ai and Higgsfield routes by cost per usable asset — not sticker price."
       />
       <div className="mt-14 grid gap-14 lg:mt-16 lg:grid-cols-12 lg:gap-6">
         <div className="reveal lg:col-span-6">
           <p className="label mb-5 border-b border-line pb-3">Model router · task class → provider</p>
           <LazyRouterDiagram />
           <p className="mt-6 text-[13.5px] leading-[21px] text-fg-muted">
-            Missing credentials put a provider in <span className="font-mono text-fg-2">needs_configuration</span> and fall back to mock
-            mode — never a crash. Every call carries a cost ceiling that paid providers check before they run.
+            A provider without credentials shows as “needs setup” and its tasks fall back to Demo mode — never a crash. Without Grok,
+            research runs on local models with no live web access. Every paid call carries a cost ceiling that is checked before it runs.
           </p>
         </div>
         <div className="reveal-late lg:col-span-6">

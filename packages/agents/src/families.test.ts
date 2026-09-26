@@ -124,9 +124,16 @@ describe("production workflows per service family (demo defects → repair → Q
       captureCommandQueue(deps.queue);
       const oppId = await insertBrief(t, brief, i);
       await handlers["opportunity-analyse"]({ tenantId: t.tenantId, opportunityId: oppId }, deps);
+      // Triage alone never recommends pursuit: it is a preliminary "consider" queued for deep analysis.
+      const [triaged] = await db.select().from(opportunity).where(eq(opportunity.id, oppId));
+      expect(triaged!.recommendation).toBe("consider");
+      expect(triaged!.status).toBe("analysed");
+      expect(deps.queue.jobs.map((x) => x.name)).toContain("opportunity-refine");
+      await drain(deps); // deep analysis (deterministic stand-in for the model in demo mode) promotes it
       const [opp] = await db.select().from(opportunity).where(eq(opportunity.id, oppId));
       expect(opp!.marketKey).toBe(brief.family);
       expect(opp!.recommendation).toBe("pursue");
+      expect(opp!.status).toBe("shortlisted");
 
       await approveOpportunity(t.ctx, oppId);
       await drain(deps);

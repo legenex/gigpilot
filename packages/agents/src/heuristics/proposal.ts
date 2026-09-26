@@ -79,13 +79,13 @@ const APPROACH: Record<string, (a: OpportunityAnalysis) => string[]> = {
   "paid-social-ugc": (a) => [
     "Day 1–2: angle research on your category and competitors' live ads, then a hook bank mapped to buyer objections.",
     `Day 2–3: concepts and scripts for sign-off — every ${a.deliverables[0]?.item.toLowerCase() ?? "asset"} opens with a pattern interrupt in the first 1.5 seconds.`,
-    "Two delivery drops so you can put the first batch into Ads Manager while the second is in production.",
-    "Every file checked for aspect ratio, safe zones and caption legibility before it reaches you.",
+    "Concepts and hooks mapped to your buyer's objections before anything is produced.",
+    "Every file checked for aspect ratio and logo safe zones before it reaches you.",
   ],
   "image-design": () => [
     "A quick style frame first so we lock direction before producing the full set.",
     "Consistent lighting, shadows and colour across the whole batch (colour-checked against your references).",
-    "Exported at the exact sizes you listed plus editable sources.",
+    "Exported at the exact sizes you listed.",
     "Each file checked for dimensions, safe margins and text fit before delivery.",
   ],
   "localization-repurposing": (a) => [
@@ -97,13 +97,13 @@ const APPROACH: Record<string, (a: OpportunityAnalysis) => string[]> = {
   "ai-automation": () => [
     "Day 1: confirm triggers, field mapping and failure modes with you (a one-page design you sign off).",
     "Build with idempotent upserts, retry with backoff on rate limits and a dead-letter log — nothing fails silently.",
-    "Automated tests for mapping, dedupe and retry paths, plus a test report you can re-run.",
-    "Runbook and a recorded walkthrough so your team owns it after handover.",
+    "Automated tests for mapping, dedupe and retry paths that you can run in your environment (I deliver them with the source).",
+    "A written runbook and handover checklist so your team owns it after handover.",
   ],
   "web-app-builds": () => [
     "Route map and component plan agreed up front, built straight from your designs.",
     "Performance budget from day one (Lighthouse 90+, image optimisation, no layout shift).",
-    "Tests on the critical paths and a staging preview link for every milestone.",
+    "Tests on the critical paths, delivered with the source so you can run them in your environment.",
     "Deployment guide and handover checklist so you're not locked in.",
   ],
   "research-content": () => [
@@ -173,7 +173,7 @@ export function draftProposal(input: DraftInput): ProposalDraft {
   const scope = [
     ...deliverables.map((d) => ({ item: `${d.quantity > 1 ? `${d.quantity}× ` : ""}${d.item}`, detail: d.format })),
     ...(a.serviceFamily === "ai-automation" || a.serviceFamily === "web-app-builds"
-      ? [{ item: "Tests + test report", detail: "Re-runnable" }, { item: "Runbook & handover", detail: "Written + walkthrough" }]
+      ? [{ item: "Automated tests (source)", detail: "Written for you to run in your environment" }, { item: "Runbook & handover checklist", detail: "Written" }]
       : [{ item: "One revision round", detail: "Consolidated feedback" }]),
   ];
 
@@ -194,4 +194,65 @@ export function draftProposal(input: DraftInput): ProposalDraft {
     assumptions,
     questions: [...new Set(questions)],
   };
+}
+
+// ---------------------------------------------------------------------------
+// Scope honesty (post-validation of model drafts)
+// ---------------------------------------------------------------------------
+
+/** Artifacts the pipeline cannot produce, and the capability a scope item implies. */
+const IMPLIED: { re: RegExp; capability: string; never?: boolean; label: string }[] = [
+  { re: /\blayered\b|\beditable (source|files?|psd|figma|design)\b|\bpsd\b|\bfigma (file|source)s?\b|\bsource files? \(figma|\.fig\b/i, capability: "editable_source", never: true, label: "layered / editable source files" },
+  { re: /\b(recorded|loom|video)\s+walk-?through\b|\bwalk-?through (call|video|recording)\b|\bscreen recording\b/i, capability: "walkthrough", never: true, label: "recorded walkthrough" },
+  { re: /\bstaging (link|preview|url)s?\b|\bpreview (link|deploy)s?\b|\bhost(ing|ed) (it|the site)\b|\bdeploy(ed)? (it )?(to|on) (vercel|netlify|your|production)\b/i, capability: "deployment", never: true, label: "hosting / deployment" },
+  { re: /\bunlimited revisions?\b/i, capability: "unlimited_revisions", never: true, label: "unlimited revisions" },
+  { re: /\bvoice-?overs?\b|\bnarration\b/i, capability: "audio.voiceover", label: "voiceover" },
+  { re: /\bmusic\b|\bsound design\b|\bsoundtrack\b/i, capability: "audio.music", label: "music" },
+  { re: /\bdub(bing|bed)?\b/i, capability: "audio.dub", label: "dubbing" },
+  { re: /\b3d\b/i, capability: "model.3d", label: "3D" },
+  { re: /\bsubtitles?\b|\bsrt\b|\btranslat/i, capability: "text.translate", label: "translation / subtitles" },
+];
+
+export function plannedCapabilities(a: OpportunityAnalysis): Set<string> {
+  return new Set([...a.productionEstimates.map((e) => e.capability), ...a.proposedWorkflow.map((s) => s.capability).filter((c): c is NonNullable<typeof c> => Boolean(c))]);
+}
+
+/** Why a scope item cannot be promised (null when it is backed by the plan). */
+export function unsupportedScopeReason(text: string, planned: Set<string>): string | null {
+  for (const i of IMPLIED) {
+    if (!i.re.test(text)) continue;
+    if (i.never) return `${i.label} is not something GigPilot produces`;
+    if (!planned.has(i.capability)) return `${i.label} is not in the planned workflow`;
+  }
+  return null;
+}
+
+/** Keep only scope items backed by the analysis deliverables / planned workflow. */
+export function validateScope(scope: ProposalDraft["scope"], a: OpportunityAnalysis): { scope: ProposalDraft["scope"]; removed: { item: string; reason: string }[] } {
+  const planned = plannedCapabilities(a);
+  const kept: ProposalDraft["scope"] = [];
+  const removed: { item: string; reason: string }[] = [];
+  for (const s of scope) {
+    const reason = unsupportedScopeReason(`${s.item} ${s.detail ?? ""}`, planned);
+    if (reason) removed.push({ item: s.item, reason });
+    else kept.push(s);
+  }
+  return { scope: kept, removed };
+}
+
+const ROUND_WORDS: Record<string, number> = { one: 1, a: 1, single: 1, two: 2, three: 3, four: 4, five: 5, six: 6 };
+
+/** Revision rounds a draft promises (Infinity for "unlimited"); 0 when none are mentioned. */
+export function promisedRevisionRounds(text: string): number {
+  if (/\bunlimited (revisions?|rounds?)\b/i.test(text)) return Number.POSITIVE_INFINITY;
+  let max = 0;
+  for (const m of text.matchAll(/\b(\d{1,2}|one|a|single|two|three|four|five|six)\s+(?:consolidated\s+|structured\s+|free\s+|rounds? of\s+)?(?:revision|revisions|round of revisions|rounds of revisions|revision rounds?)\b/gi)) {
+    const n = /^\d+$/.test(m[1]!) ? Number(m[1]) : (ROUND_WORDS[m[1]!.toLowerCase()] ?? 0);
+    if (n > max) max = n;
+  }
+  for (const m of text.matchAll(/\b(\d{1,2}|one|two|three|four|five|six)\s+rounds?\s+of\s+(?:revisions?|changes|edits)\b/gi)) {
+    const n = /^\d+$/.test(m[1]!) ? Number(m[1]) : (ROUND_WORDS[m[1]!.toLowerCase()] ?? 0);
+    if (n > max) max = n;
+  }
+  return max;
 }

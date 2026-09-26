@@ -19,7 +19,7 @@ export const dynamic = "force-dynamic";
 export default function Home() {
   return (
     <>
-      <SiteHeader />
+      <SiteHeader ctaAware />
       <main id="main">
         <Hero />
         <DefaultsStrip />

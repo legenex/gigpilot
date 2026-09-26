@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { INTEGRATIONS } from "@gigpilot/contracts";
 import { FileStatusAdapter, getAgentOSAdapter, resetAgentOSAdapter } from "./agentos";
 import { checkIntegration } from "./health";
+import { resetWebFeedCache } from "./sources/web";
 import { setTenantSecretLookup } from "./lib/credentials";
 import { CLEAR_PROVIDER_ENV, jsonResponse, setEnv } from "./lib/testing";
 import type { AgentOSStatusSnapshot } from "./types";
@@ -21,8 +22,9 @@ afterEach(() => {
 });
 
 describe("checkIntegration", () => {
-  it("returns a secret-free status for every registry key with nothing configured, without network calls", async () => {
-    const fetchSpy = vi.fn(async () => {
+  it("returns a secret-free status for every registry key with nothing configured, without network calls (except one cached feed reachability check)", async () => {
+    resetWebFeedCache();
+    const fetchSpy = vi.fn(async (_url: string) => {
       throw new Error("network must not be used");
     });
     vi.stubGlobal("fetch", fetchSpy);
@@ -36,7 +38,8 @@ describe("checkIntegration", () => {
       freelancer: "needs_configuration",
       contra: "needs_configuration",
       fiverr: "needs_configuration",
-      web: "connected",
+      // Web feeds report a REAL signal: the (failed) cached reachability check → degraded, never a hopeful "connected".
+      web: "degraded",
       direct: "connected",
       mock: "mock",
       agentos: "needs_configuration",
@@ -47,7 +50,8 @@ describe("checkIntegration", () => {
       expect(h.checkedAt).toMatch(/^\d{4}-/);
       expect(typeof h.latencyMs).toBe("number");
     }
-    expect(fetchSpy).not.toHaveBeenCalled();
+    // Only the web feeds' single HEAD reachability check touched the network (cached ≥ 60 min).
+    expect(fetchSpy.mock.calls.map((c) => new URL(String(c[0])).hostname)).toEqual(["weworkremotely.com"]);
     expect(Object.keys(expected).sort()).toEqual(INTEGRATIONS.map((i) => i.key).sort());
   });
 
@@ -90,12 +94,33 @@ describe("AgentOS adapter", () => {
     lastErrors: [{ at: "2026-09-26T00:00:00Z", message: "call failed with Authorization: Bearer abcdefghijklmnop" }],
   };
 
-  it("is noop when no writable status directory exists", async () => {
+  it("is noop when no writable status directory exists — never connected, even with the supervision token", async () => {
     const a = getAgentOSAdapter();
     expect(a.mode).toBe("noop");
     await a.publishStatus(snapshot);
     const h = await a.health();
     expect(h.meta?.mode).toBe("noop");
+    const r = setEnv({ AGENTOS_SUPERVISION_TOKEN: "test-token-placeholder" });
+    expect((await a.health()).status).toBe("needs_configuration");
+    r();
+  });
+
+  it("is connected only while the status file was written in the last 5 minutes (pull-only, registration pending)", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "gp-agentos-fresh-"));
+    try {
+      const file = path.join(dir, "agentos.json");
+      const a = new FileStatusAdapter(file);
+      expect((await a.health()).status).toBe("needs_configuration"); // nothing published yet
+      await a.publishStatus(snapshot);
+      const fresh = await a.health();
+      expect(fresh.status).toBe("connected");
+      expect(fresh.detail).toContain("status snapshot published (pull-only); AgentOS registration pending");
+      const stale = await a.health(Date.now() + 6 * 60_000);
+      expect(stale.status).toBe("needs_configuration");
+      expect(stale.detail).toMatch(/stale/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("writes the snapshot atomically (redacted) and reports the last publish time", async () => {

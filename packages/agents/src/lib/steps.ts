@@ -19,8 +19,8 @@ export function isOwnerBlocked(step: StepLike): boolean {
   return step.status === "blocked" && (OWNER_BLOCK_REASONS as readonly string[]).includes(blockedReasonOf(step) ?? "");
 }
 
-/** Copy of a step output without the owner-block markers (used when the owner resumes). */
+/** Copy of a step output without the owner-block markers and retry backoff (used when the owner resumes / retries). */
 export function clearBlockMarkers(output: unknown): Record<string, unknown> {
-  const { blockedReason: _r, blockedAt: _a, resumeRequestedAt: _q, ...rest } = (output ?? {}) as Record<string, unknown>;
+  const { blockedReason: _r, blockedAt: _a, resumeRequestedAt: _q, retryBackoffSeconds: _b, ...rest } = (output ?? {}) as Record<string, unknown>;
   return rest;
 }

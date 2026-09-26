@@ -12,7 +12,8 @@ export function SectionRule({ index, name, stage }: { index: string; name: strin
       <span className="label tnum text-fg">{index}</span>
       <span className="label">{name}</span>
       <span className="ruler mt-[1px] hidden flex-1 self-start opacity-50 sm:block" />
-      {stage && <span className="label ml-auto sm:ml-0">{stage}</span>}
+      {/* Stage names are secondary; below `sm` they crowd the section name, so they drop out. */}
+      {stage && <span className="label hidden sm:block">{stage}</span>}
     </div>
   );
 }

@@ -19,30 +19,40 @@ import {
   type TenantSettingsInput,
 } from "@gigpilot/contracts";
 import {
+  agentEvent,
   agentRun,
   and,
   application,
   asc,
+  asset,
   audit,
+  auditEvent,
   clearTenantSecret,
+  client,
+  costEstimate,
   costLedgerEntry,
   delivery,
   desc,
   emitEvent,
   eq,
+  generation,
   getDb,
   getTenantSettings,
   gte,
   inArray,
   isNull,
   job,
+  lt,
   market,
   marketInsight,
   notification,
   opportunity,
   opportunityAnalysis,
+  opportunityScore,
   proposal,
   providerIntegration,
+  providerMetric,
+  qaReview,
   repair,
   revision,
   saveTenantSecret,
@@ -52,13 +62,18 @@ import {
   workflow,
   workflowStep,
   type Actor,
+  type Executor,
 } from "@gigpilot/db";
+import { SAMPLE_MARKET_METRICS, SAMPLE_PROVIDER, tenantSampleCutoff } from "@gigpilot/db/demo";
 import { enqueue } from "@gigpilot/db/queue";
 import { dedupeHash, findDuplicate } from "@gigpilot/economics";
 import { matchMarket, normaliseRaw } from "./agents/scout";
 import { createJobFromApplication } from "./domain/jobs";
 import { isQaStep } from "./heuristics/workflows";
 import { blockedReasonOf, clearBlockMarkers, isOwnerBlocked } from "./lib/steps";
+
+/** Sample-data helpers for the dashboard: a record is seeded sample history when created_at < tenant.created_at. */
+export { isSampleRecord, tenantSampleCutoff, SAMPLE_PROVIDER, SAMPLE_MODEL, SAMPLE_ACTOR_ID } from "@gigpilot/db/demo";
 
 export interface CommandContext {
   tenantId: string;
@@ -1179,4 +1194,143 @@ export async function updateMarkets(ctx: CommandContext, patches: { key: string;
       await audit(tx, { tenantId: ctx.tenantId, actor: actor(ctx), action: "market.updated", subjectType: "market", subjectId: res[0].id, data: { key: p.key, ...data } });
     }
   });
+}
+
+// ---------------------------------------------------------------------------
+// Sample data & owner QA decisions
+// ---------------------------------------------------------------------------
+
+export interface ClearSampleDataResult {
+  cutoff: string;
+  deleted: Record<string, number>;
+  marketsReset: number;
+}
+
+/**
+ * Delete the workspace's seeded sample history: every tenant row with
+ * created_at < tenant.created_at (the sample-data contract of the demo seeder),
+ * in FK-safe order inside one transaction, plus `sample` provider metrics, and
+ * reset market metrics that still carry the seeded values. Audited. Live data
+ * (created after the workspace existed) is never touched.
+ */
+export async function clearSampleData(ctx: CommandContext): Promise<ClearSampleDataResult> {
+  requireOperator(ctx);
+  const db = getDb();
+  const cutoff = await tenantSampleCutoff(db, ctx.tenantId);
+  if (!cutoff) throw new CommandError("Workspace not found", "not_found");
+  const deleted: Record<string, number> = {};
+  let marketsReset = 0;
+  await db.transaction(async (tx) => {
+    const run = async (name: string, del: (x: Executor) => Promise<unknown[]>) => {
+      deleted[name] = (await del(tx)).length;
+    };
+    const t = ctx.tenantId;
+    // Leaves first; every FK to a deleted parent is either cascaded or already gone.
+    await run("agent_event", (x) => x.delete(agentEvent).where(and(eq(agentEvent.tenantId, t), lt(agentEvent.createdAt, cutoff))).returning({ id: agentEvent.id }));
+    await run("audit_event", (x) => x.delete(auditEvent).where(and(eq(auditEvent.tenantId, t), lt(auditEvent.createdAt, cutoff))).returning({ id: auditEvent.id }));
+    await run("notification", (x) => x.delete(notification).where(and(eq(notification.tenantId, t), lt(notification.createdAt, cutoff))).returning({ id: notification.id }));
+    await run("market_insight", (x) => x.delete(marketInsight).where(and(eq(marketInsight.tenantId, t), lt(marketInsight.createdAt, cutoff))).returning({ id: marketInsight.id }));
+    await run("cost_ledger_entry", (x) => x.delete(costLedgerEntry).where(and(eq(costLedgerEntry.tenantId, t), lt(costLedgerEntry.createdAt, cutoff))).returning({ id: costLedgerEntry.id }));
+    await run("qa_review", (x) => x.delete(qaReview).where(and(eq(qaReview.tenantId, t), lt(qaReview.createdAt, cutoff))).returning({ id: qaReview.id }));
+    await run("repair", (x) => x.delete(repair).where(and(eq(repair.tenantId, t), lt(repair.createdAt, cutoff))).returning({ id: repair.id }));
+    await run("revision", (x) => x.delete(revision).where(and(eq(revision.tenantId, t), lt(revision.createdAt, cutoff))).returning({ id: revision.id }));
+    await run("delivery", (x) => x.delete(delivery).where(and(eq(delivery.tenantId, t), lt(delivery.createdAt, cutoff))).returning({ id: delivery.id }));
+    await run("asset", (x) => x.delete(asset).where(and(eq(asset.tenantId, t), lt(asset.createdAt, cutoff))).returning({ id: asset.id }));
+    await run("generation", (x) => x.delete(generation).where(and(eq(generation.tenantId, t), lt(generation.createdAt, cutoff))).returning({ id: generation.id }));
+    await run("agent_run", (x) => x.delete(agentRun).where(and(eq(agentRun.tenantId, t), lt(agentRun.createdAt, cutoff))).returning({ id: agentRun.id }));
+    await run("workflow_step", (x) => x.delete(workflowStep).where(and(eq(workflowStep.tenantId, t), lt(workflowStep.createdAt, cutoff))).returning({ id: workflowStep.id }));
+    await run("workflow", (x) => x.delete(workflow).where(and(eq(workflow.tenantId, t), lt(workflow.createdAt, cutoff))).returning({ id: workflow.id }));
+    await run("job", (x) => x.delete(job).where(and(eq(job.tenantId, t), lt(job.createdAt, cutoff))).returning({ id: job.id }));
+    await run("application", (x) => x.delete(application).where(and(eq(application.tenantId, t), lt(application.createdAt, cutoff))).returning({ id: application.id }));
+    await run("proposal", (x) => x.delete(proposal).where(and(eq(proposal.tenantId, t), lt(proposal.createdAt, cutoff))).returning({ id: proposal.id }));
+    await run("opportunity_score", (x) => x.delete(opportunityScore).where(and(eq(opportunityScore.tenantId, t), lt(opportunityScore.createdAt, cutoff))).returning({ id: opportunityScore.id }));
+    await run("cost_estimate", (x) => x.delete(costEstimate).where(and(eq(costEstimate.tenantId, t), lt(costEstimate.createdAt, cutoff))).returning({ id: costEstimate.id }));
+    await run("opportunity_analysis", (x) => x.delete(opportunityAnalysis).where(and(eq(opportunityAnalysis.tenantId, t), lt(opportunityAnalysis.createdAt, cutoff))).returning({ id: opportunityAnalysis.id }));
+    await run("opportunity", (x) => x.delete(opportunity).where(and(eq(opportunity.tenantId, t), lt(opportunity.createdAt, cutoff))).returning({ id: opportunity.id }));
+    await run("client", (x) => x.delete(client).where(and(eq(client.tenantId, t), lt(client.createdAt, cutoff))).returning({ id: client.id }));
+    // provider_metric has no created_at: seeded rows are the `sample` provider's.
+    await run("provider_metric", (x) => x.delete(providerMetric).where(and(eq(providerMetric.tenantId, t), eq(providerMetric.provider, SAMPLE_PROVIDER))).returning({ id: providerMetric.id }));
+    // Market metrics that still carry exactly the seeded values came from the seed.
+    const markets = await tx.select({ id: market.id, key: market.key, metrics: market.metrics, recommendedAllocationPct: market.recommendedAllocationPct }).from(market).where(eq(market.tenantId, t));
+    for (const m of markets) {
+      const seeded = SAMPLE_MARKET_METRICS[m.key];
+      if (seeded && m.metrics && JSON.stringify(m.metrics) === JSON.stringify(seeded.metrics)) {
+        await tx.update(market).set({ metrics: null, recommendedAllocationPct: null }).where(eq(market.id, m.id));
+        marketsReset++;
+      }
+    }
+    await audit(tx, { tenantId: t, actor: actor(ctx), action: "tenant.sample_data_cleared", subjectType: "tenant", subjectId: t, data: { cutoff: cutoff.toISOString(), deleted, marketsReset } });
+    await emitEvent(tx, {
+      tenantId: t,
+      type: "system",
+      level: "info",
+      agent: "orchestrator",
+      subjectType: "tenant",
+      subjectId: t,
+      message: `Sample data cleared — ${Object.values(deleted).reduce((a, b) => a + b, 0)} seeded rows removed${marketsReset ? `, ${marketsReset} market metric set${marketsReset === 1 ? "" : "s"} reset` : ""}`,
+    });
+  });
+  return { cutoff: cutoff.toISOString(), deleted, marketsReset };
+}
+
+const acceptSchema = z.object({
+  codes: z.array(z.string().trim().min(2).max(60).regex(/^[a-z0-9_]+$/)).min(1).max(10),
+  note: z.string().trim().min(3).max(500),
+  stepKey: z.string().trim().max(80).optional(),
+});
+
+/** Findings the owner may never waive (security, and live mock output — D17 f). */
+const NON_WAIVABLE = new Set(["secret_file", "corrupt_archive", "file_missing", "empty_file"]);
+
+/**
+ * Owner decision on QA findings that automation cannot fix (e.g. tests the brief requires but
+ * GigPilot cannot execute): the findings stay on record but are downgraded to minor with the
+ * owner's note, and QA re-runs. Audited. Never allowed for security findings, nor for mock
+ * output in a live workspace.
+ */
+export async function acceptQaFindings(ctx: CommandContext, jobId: string, input: z.input<typeof acceptSchema>) {
+  requireOperator(ctx);
+  const data = acceptSchema.parse(input);
+  const bad = data.codes.filter((c) => NON_WAIVABLE.has(c));
+  const db = getDb();
+  const [t] = await db.select({ mode: tenant.mode }).from(tenant).where(eq(tenant.id, ctx.tenantId)).limit(1);
+  if (t?.mode === "live" && data.codes.includes("produced_by_mock")) bad.push("produced_by_mock");
+  if (bad.length) throw new CommandError(`These findings cannot be accepted: ${bad.join(", ")}`, "invalid");
+  const j = await loadJob(ctx, jobId);
+  if (!["executing", "qa", "repairing"].includes(j.status)) throw new CommandError(`QA findings can only be accepted while the job is in production (it is ${j.status.replace(/_/g, " ")}).`, "conflict");
+  const steps = await loadActiveWorkflowSteps(ctx.tenantId, j.id);
+  const qa = steps.find((s) => isQaStep(s));
+  if (!qa) throw new CommandError("This job has no QA step", "not_found");
+  const who = actor(ctx);
+  const at = new Date().toISOString();
+  const input0 = (qa.input ?? {}) as Record<string, unknown>;
+  const accepted = [...((Array.isArray(input0.acceptedFindings) ? input0.acceptedFindings : []) as unknown[]), ...data.codes.map((code) => ({ code, stepKey: data.stepKey ?? null, note: data.note, by: ctx.userId, at }))];
+  await db.transaction(async (tx) => {
+    await tx.update(workflowStep).set({ input: { ...input0, acceptedFindings: accepted } }).where(eq(workflowStep.id, qa.id));
+    if (qa.status === "failed" || qa.status === "blocked") {
+      await transition(tx, {
+        machine: "step",
+        id: qa.id,
+        tenantId: ctx.tenantId,
+        to: "ready",
+        actor: who,
+        reason: `owner accepted QA findings: ${data.codes.join(", ")}`,
+        patch: { maxAttempts: Math.max(qa.maxAttempts, qa.attempts + 1), output: clearBlockMarkers(qa.output), error: null },
+      });
+    }
+    await tx.update(repair).set({ status: "failed" }).where(and(eq(repair.jobId, j.id), eq(repair.strategy, "escalate"), eq(repair.status, "blocked")));
+    await audit(tx, { tenantId: ctx.tenantId, actor: who, action: "qa.findings_accepted", subjectType: "job", subjectId: j.id, data: { codes: data.codes, stepKey: data.stepKey ?? null, note: data.note } });
+    await emitEvent(tx, {
+      tenantId: ctx.tenantId,
+      type: "job.resumed",
+      level: "warn",
+      agent: "qa",
+      subjectType: "job",
+      subjectId: j.id,
+      jobId: j.id,
+      message: `Owner accepted QA finding${data.codes.length === 1 ? "" : "s"} ${data.codes.join(", ")} on ${j.title.slice(0, 80)} — “${data.note.slice(0, 120)}”; QA re-runs`,
+    });
+  });
+  await enqueue(QUEUES.workflowTick, { tenantId: ctx.tenantId, jobId: j.id }, { singletonKey: j.id });
+  return { accepted: data.codes };
 }

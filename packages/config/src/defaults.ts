@@ -83,6 +83,12 @@ export const BUSINESS_DEFAULTS = {
   sourcing: {
     refreshIntervalMinutes: 30,
     opportunityMaxAgeHours: 96,
+    /** Submitted / client_response applications idle this long are marked expired (audited). */
+    applicationExpiryDays: 21,
+  },
+  demo: {
+    /** Demo workspaces inject one labelled simulated defect so the QA → repair loop is visible. */
+    injectDefect: true,
   },
 } as const;
 
@@ -124,6 +130,14 @@ export const OPERATIONAL_DEFAULTS = {
   circuitBreakerFailures: 3,
   /** Router circuit breaker: how long an open circuit skips the family before a half-open probe. */
   circuitBreakerCooldownSeconds: 60,
+  /** Automatic step retries back off: startAfter = base × 2^(failed attempts − 1) … */
+  stepRetryBaseSeconds: 30,
+  /** … capped at this many seconds. */
+  stepRetryMaxSeconds: 600,
+  /** AgentOS health is `connected` only when the status snapshot was written within this window. */
+  agentosStatusFreshMinutes: 5,
+  /** Public web-feed reachability checks (health) are cached at least this long. */
+  webFeedHealthCacheMinutes: 60,
 } as const;
 
 /** Initial service families GigPilot understands. Configurable per tenant (Market Lab). */

@@ -1,4 +1,4 @@
-import { ArrowRight } from "lucide-react";
+import { ArrowDown, ArrowRight } from "lucide-react";
 import { AGENTS } from "@gigpilot/contracts";
 import { siteUrls } from "@/lib/site";
 import { getViewer } from "@/lib/session";
@@ -16,7 +16,7 @@ const PIPELINE: { key: keyof typeof AGENTS; short: string; name?: string; role?:
     key: "creative",
     short: "Execution",
     name: "Execution agents",
-    role: "Creative, coding, automation, research, copy, localisation and finishing agents run the workflow steps inside spend limits.",
+    role: "Creative, coding, automation, research, copy, localization and finishing agents run the workflow steps inside spend limits.",
   },
   { key: "qa", short: "QA" },
 ];
@@ -38,7 +38,7 @@ export async function Hero() {
               <span className="relative inline-flex size-1.5">
                 <span className="absolute inset-0 animate-pulse-dot rounded-full bg-profit text-profit" />
               </span>
-              Private beta — opportunity-to-delivery OS
+              Early access — opportunity-to-delivery OS
             </p>
             <h1 id="hero-title" className="display-1 mt-5">
               Find profitable work.
@@ -52,24 +52,24 @@ export async function Hero() {
               specialist AI agents to deliver the work. You approve three things:{" "}
               <span className="text-fg">what to pursue, what to commit to, and what ships.</span>
             </p>
-            <div className="mt-6 flex flex-wrap items-center gap-3">
+            <div className="mt-6 flex flex-wrap items-center gap-3" data-cta-watch>
               {signedIn ? (
                 <LinkButton href={urls.app} size="lg" data-testid="hero-dashboard">
                   Go to Dashboard
                   <ArrowRight aria-hidden className="size-4 transition-transform group-hover/btn:translate-x-0.5" strokeWidth={2} />
                 </LinkButton>
               ) : (
-                <>
-                  <LinkButton href={urls.signup} size="lg" data-testid="hero-signup">
-                    Sign up
-                    <ArrowRight aria-hidden className="size-4 transition-transform group-hover/btn:translate-x-0.5" strokeWidth={2} />
-                  </LinkButton>
-                  <LinkButton href={urls.login} variant="outline" size="lg" data-testid="hero-login">
-                    Log in
-                  </LinkButton>
-                </>
+                <LinkButton href={urls.signup} size="lg" data-testid="hero-signup">
+                  Sign up
+                  <ArrowRight aria-hidden className="size-4 transition-transform group-hover/btn:translate-x-0.5" strokeWidth={2} />
+                </LinkButton>
               )}
-              <span className="text-[13px] leading-5 text-fg-muted sm:ml-2">Starts in mock mode · $0 paid spend</span>
+              {/* Log in stays in the header; this slot explains the product instead. */}
+              <LinkButton href="#loop" variant="outline" size="lg" data-testid="hero-how">
+                See how it works
+                <ArrowDown aria-hidden className="size-4 text-fg-2 transition-transform group-hover/btn:translate-y-0.5" strokeWidth={2} />
+              </LinkButton>
+              <span className="basis-full text-[13px] leading-5 text-fg-muted">Starts in Demo mode · $0 paid spend</span>
             </div>
           </div>
         </div>
@@ -85,6 +85,14 @@ export async function Hero() {
               <Legend glyph={<span className="size-[7px] rotate-45 ring-[1.25px] ring-accent" />} label="Owner approval" />
               <Legend glyph={<span className="h-0 w-3 border-t border-dashed border-warn" />} label="QA → Recovery" />
               <Legend glyph={<span className="h-0 w-3 border-t border-dashed border-profit" />} label="Learning" />
+              <Legend
+                glyph={
+                  <svg viewBox="0 0 10 10" className="size-[9px]">
+                    <path d="M5 1.5 9 8.5H1Z" fill="var(--gp-accent)" />
+                  </svg>
+                }
+                label="Heading · lead job"
+              />
             </ul>
           </div>
           <PilotCore
@@ -103,7 +111,7 @@ export async function Hero() {
 
 function Legend({ glyph, label }: { glyph: React.ReactNode; label: string }) {
   return (
-    <li className="flex items-center gap-2 font-mono text-[10.5px] uppercase tracking-[0.08em] text-fg-muted">
+    <li className="flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.07em] text-fg-muted">
       <span aria-hidden className="inline-flex size-3 items-center justify-center">
         {glyph}
       </span>

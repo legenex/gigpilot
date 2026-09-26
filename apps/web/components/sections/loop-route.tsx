@@ -6,7 +6,6 @@ import { useReducedFlag } from "@/components/motion/use-reduced-flag";
 import { cn } from "@gigpilot/ui/lib/cn";
 
 export interface Waypoint {
-  code: string;
   name: string;
   body: string;
   agent: string;
@@ -36,7 +35,7 @@ export function LoopRoute({ stages }: { stages: Waypoint[] }) {
           <m.div aria-hidden className="absolute left-0 top-[39px] h-px w-[calc((100%+1rem)*0.875)] origin-left bg-fg" style={{ scaleX: progress }} />
           <Marker progress={progress} />
           {stages.map((s, i) => (
-            <Stop key={s.code} s={s} i={i} n={n} progress={progress} />
+            <Stop key={s.name} s={s} i={i} n={n} progress={progress} />
           ))}
         </div>
         <ReturnArc />
@@ -47,7 +46,7 @@ export function LoopRoute({ stages }: { stages: Waypoint[] }) {
         <div aria-hidden className="absolute bottom-3 left-[5px] top-3 w-px bg-line-strong sm:hidden" />
         <m.div aria-hidden className="absolute bottom-3 left-[5px] top-3 w-px origin-top bg-fg sm:hidden" style={{ scaleY: progress }} />
         {stages.map((s, i) => (
-          <StopVertical key={s.code} s={s} i={i} n={n} progress={progress} />
+          <StopVertical key={s.name} s={s} i={i} n={n} progress={progress} />
         ))}
       </ol>
     </div>
@@ -86,10 +85,10 @@ function Stop({ s, i, n, progress }: { s: Waypoint; i: number; n: number; progre
   return (
     <div className="relative">
       <div className="flex h-6 items-center gap-2">
-        <m.span className="font-mono text-[11px] tracking-[0.12em]" style={{ color: title }}>
-          {s.code}
+        <m.span className="tnum font-mono text-[11px] tracking-[0.08em]" style={{ color: title }}>
+          {String(i + 1).padStart(2, "0")}
         </m.span>
-        <span className="label tnum">{String(i + 1).padStart(2, "0")}</span>
+        {s.owner && <span className="label">you approve</span>}
       </div>
       <div className="relative flex h-[30px] items-center">
         <span className="relative z-[1] -ml-px">
@@ -118,10 +117,10 @@ function StopVertical({ s, i, n, progress }: { s: Waypoint; i: number; n: number
       </span>
       <div>
         <p className="flex items-center gap-2">
-          <m.span className="font-mono text-[11px] tracking-[0.12em]" style={{ color: title }}>
-            {s.code}
+          <m.span className="tnum font-mono text-[11px] tracking-[0.08em]" style={{ color: title }}>
+            {String(i + 1).padStart(2, "0")}
           </m.span>
-          <span className="label tnum">{String(i + 1).padStart(2, "0")}</span>
+          {s.owner && <span className="label">you approve</span>}
         </p>
         <m.h3 className="display-3 mt-1.5" style={{ color: title }}>
           {s.name}
@@ -164,9 +163,10 @@ function ReturnArc() {
           style={{ animation: "site-dash 1.6s linear infinite reverse" }}
         />
       </svg>
-      <p className="label absolute left-1/2 top-[44px] -translate-x-1/2 bg-bg px-3">
-        <span className="text-profit">Learn → Discover</span> · every outcome re-weights the next search
-      </p>
+      {/* Centred with flex, not a transform: a transformed opaque label gets its own layer and LCD-fringed text. */}
+      <div className="absolute inset-x-0 top-[44px] flex justify-center">
+        <p className="label whitespace-nowrap bg-bg px-3 text-fg-2">Learn → Discover · every outcome informs the next search</p>
+      </div>
     </div>
   );
 }

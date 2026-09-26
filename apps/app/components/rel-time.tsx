@@ -30,7 +30,7 @@ export function RelTime({ date, className, compact }: { date: Date | string | nu
   const text = now === null ? "" : rel(base - d.getTime());
   return (
     <time dateTime={d.toISOString()} title={d.toLocaleString()} className={className} suppressHydrationWarning>
-      {compact ? text.replace(" ago", "") : text}
+      {compact ? (text === "just now" ? "now" : text.replace(" ago", "")) : text}
     </time>
   );
 }

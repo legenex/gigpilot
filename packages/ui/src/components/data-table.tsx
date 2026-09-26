@@ -1,10 +1,12 @@
 import type { HTMLAttributes, ReactNode, TdHTMLAttributes, ThHTMLAttributes } from "react";
 import { cn } from "../lib/cn";
+import { TableScroll } from "./table-scroll";
 
 /**
  * Dense data table primitives (32–36px rows, hairline separators, mono
  * right-aligned numbers). The wrapper scrolls horizontally inside its own
- * container so wide tables never scroll the page.
+ * container so wide tables never scroll the page; while more columns sit
+ * off-screen the right edge fades, and `stickyFirst` pins the first column.
  */
 export function DataTable({
   children,
@@ -12,14 +14,15 @@ export function DataTable({
   tableClassName,
   minWidth,
   label,
+  stickyFirst,
   ...props
-}: HTMLAttributes<HTMLDivElement> & { tableClassName?: string; minWidth?: number; label?: string }) {
+}: HTMLAttributes<HTMLDivElement> & { tableClassName?: string; minWidth?: number; label?: string; stickyFirst?: boolean }) {
   return (
-    <div className={cn("relative w-full min-w-0 overflow-x-auto overscroll-x-contain", className)} {...props}>
-      <table aria-label={label} className={cn("w-full border-separate border-spacing-0 text-[13px]", tableClassName)} style={minWidth ? { minWidth } : undefined}>
+    <TableScroll className={cn("relative w-full min-w-0 overflow-x-auto overscroll-x-contain", className)} {...props}>
+      <table aria-label={label} className={cn("w-full border-separate border-spacing-0 text-[13px]", stickyFirst && "gp-sticky-first", tableClassName)} style={minWidth ? { minWidth } : undefined}>
         {children}
       </table>
-    </div>
+    </TableScroll>
   );
 }
 
@@ -67,7 +70,7 @@ export function TH({
     <th
       scope="col"
       className={cn(
-        "h-8 whitespace-nowrap px-3 font-mono text-[10.5px] font-medium uppercase tracking-[0.06em] text-fg-3 shadow-[inset_0_-1px_0_0_var(--gp-line-strong)]",
+        "h-8 whitespace-nowrap px-3 font-mono text-[11px] font-medium uppercase tracking-[0.05em] text-fg-3 shadow-[inset_0_-1px_0_0_var(--gp-line-strong)]",
         align === "right" && "text-right",
         align === "center" && "text-center",
         align === "left" && "text-left",

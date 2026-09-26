@@ -6,7 +6,8 @@ import { useReducedFlag } from "@/components/motion/use-reduced-flag";
 
 /**
  * The mark, drawn as an instrument: the heading ring turns with scroll while
- * the course chevron holds its heading.
+ * the course chevron holds its heading. Graphite, not orange — the CTA beside
+ * it is the one accent in this viewport.
  */
 export function CtaRing() {
   const ref = useRef<HTMLDivElement>(null);
@@ -40,20 +41,12 @@ export function CtaRing() {
             />
           );
         })}
-        {Array.from({ length: 12 }, (_, i) => {
-          const a = (i / 12) * Math.PI * 2 - Math.PI / 2;
-          return (
-            <text key={i} x={r2(Math.cos(a) * 136)} y={r2(Math.sin(a) * 136 + 3.5)} textAnchor="middle" fontSize={10} className="font-mono" fill="var(--gp-fg-4)">
-              {i * 3}
-            </text>
-          );
-        })}
       </m.svg>
       <svg viewBox="-200 -200 400 400" className="absolute inset-0 h-full w-full">
         <m.path
           d="M-58 58 L58 -58 M58 -58 H4 M58 -58 V-4"
           fill="none"
-          stroke="var(--gp-accent)"
+          stroke="var(--gp-fg-3)"
           strokeWidth={6}
           strokeLinecap="round"
           strokeLinejoin="round"

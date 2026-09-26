@@ -21,7 +21,7 @@ export function TabsTrigger({ value, children, count }: { value: string; childre
   return (
     <RTabs.Trigger
       value={value}
-      className="relative flex h-9 shrink-0 items-center gap-1.5 whitespace-nowrap text-[13px] text-fg-3 outline-none transition-colors hover:text-fg-2 focus-visible:text-fg data-[state=active]:text-fg data-[state=active]:after:absolute data-[state=active]:after:inset-x-0 data-[state=active]:after:-bottom-px data-[state=active]:after:h-[2px] data-[state=active]:after:rounded-full data-[state=active]:after:bg-fg"
+      className="relative flex h-9 shrink-0 items-center gap-1.5 whitespace-nowrap text-[13px] text-fg-3 transition-colors hover:text-fg-2 focus-inset focus-visible:text-fg data-[state=active]:text-fg data-[state=active]:after:absolute data-[state=active]:after:inset-x-0 data-[state=active]:after:-bottom-px data-[state=active]:after:h-[2px] data-[state=active]:after:rounded-full data-[state=active]:after:bg-fg"
     >
       {children}
       {count !== undefined ? <span className="font-mono text-[11px] tabular text-fg-3">{count}</span> : null}

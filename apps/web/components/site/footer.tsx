@@ -24,7 +24,7 @@ export function SiteFooter() {
         <div className="md:col-span-5">
           <Logo />
           <p className="mt-4 max-w-[320px] text-[14px] leading-[22px] text-fg-muted">Find profitable work. Win it. Get it done.</p>
-          <p className="label mt-6">Private beta</p>
+          <p className="label mt-6">Early access · open sign-up</p>
         </div>
         <nav aria-label="Product" className="md:col-span-4 md:col-start-7">
           <p className="label">Product</p>

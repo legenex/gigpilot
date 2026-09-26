@@ -35,6 +35,8 @@ export function DecisionPanel(p: DecisionProps) {
   const canReject = ["new", "analysed", "shortlisted", "pursuing"].includes(s);
   const canReanalyse = ["new", "analysed", "shortlisted", "rejected"].includes(s);
   const primaryApprove = canApprove && p.recommendation !== "skip";
+  // Once pursuit is approved the owner is withdrawing a commitment in progress, not rejecting a lead.
+  const withdraw = s === "pursuing";
 
   const go = <T,>(key: string, fn: () => Promise<ActionResult<T>>) => {
     setBusy(key);
@@ -89,7 +91,7 @@ export function DecisionPanel(p: DecisionProps) {
         {canReject ? (
           <Button variant="outline" disabled={pending} onClick={() => setRejectOpen(true)} data-testid="opp-reject">
             <X className="size-3.5" strokeWidth={1.75} />
-            Reject
+            {withdraw ? "Withdraw" : "Reject"}
           </Button>
         ) : null}
         {canReanalyse ? (
@@ -117,8 +119,8 @@ export function DecisionPanel(p: DecisionProps) {
       <Dialog open={rejectOpen} onOpenChange={setRejectOpen}>
         <DialogContent
           size="sm"
-          title="Reject this opportunity?"
-          description="It leaves the Radar queues. Reasons help the scoring learn what you don’t want."
+          title={withdraw ? "Withdraw this pursuit?" : "Reject this opportunity?"}
+          description={withdraw ? "Stops the pursuit — any draft proposal is discarded and nothing is submitted. Reasons help the scoring learn." : "It leaves the Radar queues. Reasons help the scoring learn what you don’t want."}
           footer={
             <>
               <Button variant="ghost" onClick={() => setRejectOpen(false)}>
@@ -140,7 +142,7 @@ export function DecisionPanel(p: DecisionProps) {
                 }}
                 data-testid="opp-reject-confirm"
               >
-                Reject
+                {withdraw ? "Withdraw" : "Reject"}
               </Button>
             </>
           }

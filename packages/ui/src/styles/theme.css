@@ -245,7 +245,46 @@
   }
 }
 
+@layer components {
+  /* Wide tables: fade the right edge while more columns sit off-screen. */
+  .gp-scroll-fade[data-overflow-right] {
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 48px), transparent);
+    mask-image: linear-gradient(to right, #000 calc(100% - 48px), transparent);
+  }
+  /* Pinned first column (DataTable stickyFirst). Row hover/selected utilities still win. */
+  .gp-sticky-first :is(th, td):first-child {
+    position: sticky;
+    left: 0;
+    z-index: 2;
+    background: var(--gp-bg);
+  }
+  .gp-sticky-first thead :is(th, td):first-child {
+    z-index: 3;
+  }
+  .gp-scroll-fade[data-overflow-left] .gp-sticky-first :is(th, td):first-child::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    right: -10px;
+    width: 10px;
+    pointer-events: none;
+    background: linear-gradient(to right, rgba(0, 0, 0, 0.45), transparent);
+    box-shadow: inset 1px 0 0 0 var(--gp-line-strong);
+  }
+}
+
 @layer utilities {
+  /* Focus ring drawn inside the element — for links in clipped/scrolling containers. */
+  .focus-inset:focus-visible {
+    outline: 2px solid var(--gp-accent);
+    outline-offset: -2px;
+    border-radius: 4px;
+  }
+  .focus-ring:focus-visible {
+    outline: 2px solid var(--gp-accent);
+    outline-offset: 2px;
+  }
   .tabular {
     font-variant-numeric: tabular-nums;
     font-feature-settings: "tnum", "cv11";

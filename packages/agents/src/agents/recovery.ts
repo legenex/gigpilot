@@ -1,4 +1,4 @@
-import type { Capability } from "@gigpilot/contracts";
+import { QA_FINDING_CODES, type Capability } from "@gigpilot/contracts";
 import { and, delivery, emitEvent, eq, getDb, inArray, job, repair, revision, sql, transition, workflowStep, type Executor } from "@gigpilot/db";
 import { brokerOf, type AgentDeps } from "../deps";
 import { isQaStep, PRODUCTION_KINDS } from "../heuristics/workflows";
@@ -21,6 +21,9 @@ function outputOf(s: StepRow): Record<string, unknown> {
 }
 
 export function chooseStrategy(step: StepRow, codes: string[], previousRepairs: number): Strategy {
+  if (step.kind === "generate" && codes.includes(QA_FINDING_CODES.duplicateDeliverable) && codes.every((c) => c === QA_FINDING_CODES.duplicateDeliverable || LAYOUT_DEFECTS.has(c))) {
+    return previousRepairs <= 1 ? "regenerate" : "reroute";
+  }
   if (step.kind === "generate") {
     if (step.capability?.startsWith("video.")) return previousRepairs === 0 ? "regenerate" : "reroute";
     if (previousRepairs === 0 && codes.length > 0 && codes.every((c) => LAYOUT_DEFECTS.has(c))) return "repair";
@@ -167,10 +170,27 @@ export async function recoverFromQaFailure(input: { tenantId: string; jobId: str
           .join("; ");
         const label = review.failingUnits.length ? `${target.name} (${review.failingUnits.map((u) => `#${u + 1}`).join(", ")})` : target.name;
 
+        const producer = typeof outputOf(target).provider === "string" ? (outputOf(target).provider as string) : target.provider;
         const mockOnly = review.findings.some((f) => f.code === "produced_by_mock");
+        // Findings no automatic repair can fix: escalate at once instead of burning repair cycles.
+        const producerIsModel = Boolean(producer && INTELLIGENCE_FAMILIES.has(producer));
+        const testsRequired = review.findings.some((f) => f.code === QA_FINDING_CODES.testsNotExecuted && f.severity !== "minor");
+        const noProvider = review.findings.some((f) => f.code === QA_FINDING_CODES.missingFeature && /no connected provider/i.test(f.message));
+        const missingFeatures = review.findings.filter((f) => f.code === QA_FINDING_CODES.missingFeature && f.severity !== "minor");
+        const generatorCannot = missingFeatures.length > 0 && !producerIsModel && target.kind === "code";
+        // Escalate for unrepairable findings only when nothing else on the step can be repaired first.
+        const unrepairable = (code: string) =>
+          code === QA_FINDING_CODES.testsNotExecuted || (code === QA_FINDING_CODES.missingFeature && (noProvider || generatorCannot));
+        const onlyUnrepairable = codes.length > 0 && codes.every(unrepairable);
         const limit = mockOnly
           ? "the deliverable was produced by the mock provider — configure a real provider (or enable paid spend), then resume the job"
-          : !settings.autonomy.autoRepairWithinLimits
+          : onlyUnrepairable && testsRequired && !missingFeatures.length
+            ? "the brief requires tests but GigPilot has no test runner, so they cannot be executed or verified here — run them yourself and accept the finding, or cancel"
+            : onlyUnrepairable && noProvider
+              ? "no connected provider can produce this capability — deliver that part manually or cancel"
+              : onlyUnrepairable && (generatorCannot || testsRequired)
+                ? `the deterministic generator cannot implement the requested feature(s) (${missingFeatures.map((f) => f.message.replace(/^Requested feature not found in the source: /, "")).join(", ")}) — configure a coding model (GX/Factory) or accept/cancel`
+                : !settings.autonomy.autoRepairWithinLimits
             ? "auto-repair is disabled in Settings"
             : repairCount >= repairAllowance
               ? `repair limit reached (${repairAllowance} per job)`
@@ -219,16 +239,19 @@ export async function recoverFromQaFailure(input: { tenantId: string; jobId: str
         const items = (outputOf(target).items as { unitIndex: number; provider: string; model: string }[] | undefined) ?? [];
         const failingItems = items.filter((i) => review.failingUnits.includes(i.unitIndex));
         const exclude = strategy === "reroute" ? failingItems.filter((i) => i.provider !== "mock").map((i) => ({ provider: i.provider, model: i.model })) : undefined;
-        const producer = typeof outputOf(target).provider === "string" ? (outputOf(target).provider as string) : target.provider;
         const avoidFamilies = strategy === "reroute" && producer && INTELLIGENCE_FAMILIES.has(producer) ? [producer] : undefined;
-        const rationale =
+        const demoDefect = review.findings.some((f) => f.code === QA_FINDING_CODES.demoInjectedDefect);
+        const demoPrefix = demoDefect ? "a simulated defect was injected (demo mode) — " : "";
+        const duplicates = codes.includes(QA_FINDING_CODES.duplicateDeliverable);
+        const shortfall = codes.includes(QA_FINDING_CODES.deliverableShortfall);
+        const rationale = demoPrefix + (
           strategy === "repair" && target.kind === "generate"
             ? `${codes.join(", ")} on ${label} → targeted image edit (cheapest fix; other units kept)`
             : strategy === "repair"
               ? `${codes.join(", ")} on ${label} → revise the document with QA feedback`
               : strategy === "regenerate"
                 ? `${codes.join(", ")} on ${label} → regenerate${target.kind === "generate" ? " only the failing units" : ""} with the QA hint`
-                : `${codes.join(", ")} on ${label} persisted → reroute to a different provider/model`;
+                : `${codes.join(", ")} on ${label} persisted → reroute to a different provider/model`);
 
         const [row] = await db
           .insert(repair)
@@ -248,10 +271,13 @@ export async function recoverFromQaFailure(input: { tenantId: string; jobId: str
           repairId: row!.id,
           strategy,
           hint: hint || review.findings[0]?.message || "Fix the QA findings",
-          unitIndexes: review.failingUnits.length ? review.failingUnits : undefined,
-          generationIds: review.failingGenerationIds.length ? review.failingGenerationIds : undefined,
+          // A shortfall re-renders the whole batch (missing units have no item to target).
+          unitIndexes: !shortfall && review.failingUnits.length ? review.failingUnits : undefined,
+          generationIds: !shortfall && review.failingGenerationIds.length ? review.failingGenerationIds : undefined,
           exclude,
           avoidFamilies,
+          ...(duplicates ? { variantShift: n + 1 } : {}),
+          ...(demoDefect ? { demoDefect: true } : {}),
         };
         await reopen(db, j.tenantId, target, { input: { ...((target.input ?? {}) as Record<string, unknown>), repair: directive } }, `repair: ${strategy}`);
         await blockDownstream(db, j.tenantId, target, all, `re-check after repairing ${target.name}`);
@@ -267,8 +293,8 @@ export async function recoverFromQaFailure(input: { tenantId: string; jobId: str
           jobId: j.id,
           subjectType: "step",
           subjectId: target.id,
-          message: `Repairing ${label}: ${truncate(review.findings[0]?.message ?? codes.join(", "), 140)} → ${strategy}${incremental > 0 ? ` (+${money(incremental)}${budget.allowPaid ? "" : " simulated"})` : ""}`,
-          data: { strategy, incrementalCostUsd: incremental, units: review.failingUnits },
+          message: `Repairing ${label}${demoDefect ? " (simulated demo defect)" : ""}: ${truncate(review.findings.find((f) => f.severity !== "minor")?.message ?? codes.join(", "), 140)} → ${strategy}${incremental > 0 ? ` (+${money(incremental)}${budget.allowPaid ? "" : " simulated"})` : ""}`,
+          data: { strategy, incrementalCostUsd: incremental, units: review.failingUnits, demoDefect },
         });
         notes.push(`${strategy} ${label}`);
       }

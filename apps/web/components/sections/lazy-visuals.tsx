@@ -10,7 +10,7 @@ const ProfitCalculator = dynamic(() => import("./profit-calculator").then((m) =>
 });
 const WorkflowDag = dynamic(() => import("./workflow-dag").then((m) => m.WorkflowDag), {
   ssr: false,
-  loading: () => <FramePlaceholder className="h-[900px] md:h-[720px] xl:h-[420px]" label="Workflow" />,
+  loading: () => <FramePlaceholder className="h-[950px] md:h-[700px] xl:h-[490px]" label="Workflow" />,
 });
 const RouterDiagram = dynamic(() => import("./routing-visual").then((m) => m.RouterDiagram), {
   ssr: false,
@@ -35,7 +35,7 @@ export function LazyProfitCalculator({ presets }: { presets: Preset[] }) {
 
 export function LazyWorkflowDag() {
   return (
-    <LazyMount placeholder={<FramePlaceholder className="h-[900px] md:h-[720px] xl:h-[420px]" label="Workflow" />}>
+    <LazyMount placeholder={<FramePlaceholder className="h-[950px] md:h-[700px] xl:h-[490px]" label="Workflow" />}>
       <WorkflowDag />
     </LazyMount>
   );
@@ -57,10 +57,10 @@ export function LazyCreativeBroker({ defaultThreshold }: { defaultThreshold: num
   );
 }
 
-export function LazyLearningChart() {
+export function LazyLearningChart({ target }: { target: number }) {
   return (
     <LazyMount placeholder={<div className="h-[340px]" />}>
-      <LearningChart />
+      <LearningChart target={target} />
     </LazyMount>
   );
 }

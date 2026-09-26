@@ -345,6 +345,32 @@ export interface CostLineItem {
   attempts: number;
   totalUsd: number | null;
   priceSource: string;
+  /**
+   * Whether the priced route actually runs for this tenant today (absent on estimates
+   * written before 2026-09-27): "available" = configured and affordable; "local" = local
+   * compute/tooling at $0; "simulated" = no connected provider, priced at the catalog route
+   * the mock renderer simulates; "unavailable" = no provider can run it (estimate incomplete).
+   */
+  routeStatus?: "available" | "local" | "simulated" | "unavailable";
+  /** Family/provider the analysis asked for when the priced route was substituted (e.g. "factory"). */
+  requestedProvider?: string | null;
+  /** Short human-readable routing note, e.g. "factory not configured → priced on gx (local, $0)". */
+  routeNote?: string;
+  /** Capability this line prices (production lines). */
+  capability?: string;
+}
+
+/** How each production unit type of the analysis is covered by the estimate. */
+export interface CostCoverageItem {
+  label: string;
+  capability: string;
+  units: number;
+  /** "inference" = delivered by model calls, priced via the inference lines ("priced via inference"). */
+  pricedVia: "creative" | "inference" | "local" | "unpriced";
+  provider: string | null;
+  model: string | null;
+  routeStatus: "available" | "local" | "simulated" | "unavailable";
+  note?: string;
 }
 
 export interface EconomicsBreakdown {
@@ -363,6 +389,8 @@ export interface EconomicsBreakdown {
   breakEvenPriceUsd: number;
   complete: boolean;
   missing: string[];
+  /** Per production unit type: how it is priced and whether its route runs (absent on older rows). */
+  coverage?: CostCoverageItem[];
 }
 
 export interface ScoreGates {
@@ -740,6 +768,15 @@ export const qaReview = pgTable(
     findings: jsonb("findings").$type<QAFinding[]>().notNull().default([]),
     summary: text("summary").notNull(),
     attempt: integer("attempt").notNull().default(1),
+    /**
+     * How independent the model review was: "independent" (different provider family or
+     * model than the producer), "same_model" (separate review pass by the same provider+model),
+     * "deterministic_only" (no model reviewed it — mock/test mode). Null on rows before 2026-09-27.
+     */
+    independence: text("independence").$type<"independent" | "same_model" | "deterministic_only">(),
+    /** Provider/model that produced the reviewed work (null when not model-produced). */
+    producerProvider: text("producer_provider"),
+    producerModel: text("producer_model"),
     createdAt: createdAt(),
   },
   (t) => [index("qa_review_job_idx").on(t.jobId)],

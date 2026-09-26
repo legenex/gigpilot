@@ -3,7 +3,7 @@ import { LegalPage } from "@/components/site/legal-page";
 
 export const metadata: Metadata = {
   title: "Privacy",
-  description: "How GigPilot handles data during the private beta.",
+  description: "How GigPilot handles data during early access.",
   alternates: { canonical: "/privacy" },
 };
 
@@ -14,12 +14,12 @@ export default function PrivacyPage() {
       updated="September 2026"
       intro={
         <>
-          GigPilot is in private beta. This page is an honest placeholder, not a full privacy policy. A complete policy will be published
+          GigPilot is in early access. This page is an honest placeholder, not a full privacy policy. A complete policy will be published
           before general availability.
         </>
       }
     >
-      <h2>What we collect during the beta</h2>
+      <h2>What we collect during early access</h2>
       <p>
         The account details you give us (name and email), the workspace data you create — opportunities, proposals, jobs, deliverables and
         settings — and the operational logs needed to run, secure and debug the service.
@@ -37,7 +37,7 @@ export default function PrivacyPage() {
       <h2>What we don&apos;t do</h2>
       <p>We don&apos;t sell personal data, and we don&apos;t send messages to your clients unless you turn that on.</p>
       <h2>Questions</h2>
-      <p>Contact the GigPilot team through the channel listed in your beta invitation.</p>
+      <p>A dedicated contact address will be published with the full policy.</p>
     </LegalPage>
   );
 }

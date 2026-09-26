@@ -57,7 +57,7 @@ export function AllocationShift({ rows, focus }: { rows: AllocationRow[]; focus:
       <div className="flex items-center justify-between border-b border-line pb-3">
         <p className="label">Sourcing allocation · share of search effort</p>
         <div className="flex items-center gap-4">
-          <span className="hidden items-center gap-4 font-mono text-[10.5px] uppercase tracking-[0.07em] text-fg-muted sm:flex">
+          <span className="hidden items-center gap-4 font-mono text-[11px] uppercase tracking-[0.06em] text-fg-muted sm:flex">
             <span className="flex items-center gap-1.5">
               <span className="h-2 w-3 border border-dashed border-fg-3" aria-hidden /> Current
             </span>
@@ -68,7 +68,7 @@ export function AllocationShift({ rows, focus }: { rows: AllocationRow[]; focus:
           <button
             type="button"
             onClick={replay}
-            className="focus-ring inline-flex items-center gap-1.5 rounded-xs px-1.5 py-1 font-mono text-[10.5px] uppercase tracking-[0.07em] text-fg-muted hover:text-fg"
+            className="focus-ring inline-flex items-center gap-1.5 rounded-xs px-1.5 py-1 font-mono text-[11px] uppercase tracking-[0.06em] text-fg-muted hover:text-fg"
             aria-label="Replay allocation shift"
           >
             <RotateCcw className="size-3" strokeWidth={2} aria-hidden /> Replay

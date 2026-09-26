@@ -20,12 +20,12 @@ import {
 export type SourceKey = "upwork" | "freelancer" | "contra" | "fiverr" | "web" | "direct";
 
 export const SOURCES: { key: SourceKey; label: string; short: string; mode: string; detail: string }[] = [
-  { key: "upwork", label: "Upwork", short: "UPW", mode: "Official API", detail: "Official API where permitted. Polled no faster than the adapter allows." },
-  { key: "freelancer", label: "Freelancer", short: "FRL", mode: "Official API", detail: "Official API. Submission only where the marketplace permits it — after your approval." },
-  { key: "contra", label: "Contra", short: "CTR", mode: "Notifications", detail: "Parsed from the notifications you already receive. Commission-free for independents." },
-  { key: "fiverr", label: "Fiverr", short: "FVR", mode: "Notifications", detail: "Buyer-request notifications, parsed. No scraping, no browser automation." },
-  { key: "web", label: "Public feeds", short: "RSS", mode: "RSS / boards", detail: "Public RSS and job-board feeds, cached within each source's TTL." },
-  { key: "direct", label: "Direct prospects", short: "DIR", mode: "Your pipeline", detail: "Leads you add or forward. Priced with card-processing fees only." },
+  { key: "upwork", label: "Upwork", short: "Upwork", mode: "Official API", detail: "Official API where permitted. Polled no faster than the adapter allows." },
+  { key: "freelancer", label: "Freelancer", short: "Freelancer", mode: "Official API", detail: "Official API. Submission only where the marketplace permits it — after your approval." },
+  { key: "contra", label: "Contra", short: "Contra", mode: "Notifications", detail: "Parsed from the notifications you already receive. Commission-free for independents." },
+  { key: "fiverr", label: "Fiverr", short: "Fiverr", mode: "Notifications", detail: "Buyer-request notifications, parsed. No scraping, no browser automation." },
+  { key: "web", label: "Public feeds", short: "Feeds", mode: "RSS / boards", detail: "Public RSS and job-board feeds, cached within each source's TTL." },
+  { key: "direct", label: "Direct prospects", short: "Direct", mode: "Your pipeline", detail: "Leads you add or forward. Priced with card-processing fees only." },
 ];
 
 const T = BUSINESS_DEFAULTS.thresholds;
@@ -91,7 +91,7 @@ const SEEDS: OppSeed[] = [
       creative("Hook stills", "higgsfield", "higgsfield-ai/soul/v2/standard", 36, 1.4),
       inf("Scripts & hooks", "factory", 8, 2, 30),
       inf("Frame QA", "gx", 6, 1, 40),
-      tool("Music licence", 15),
+      tool("Music license", 15),
     ],
     shadowHours: 3,
     signals: { fit: 0.86, complexity: 0.45, revisionRisk: 0.35, deadlineRisk: 0.2, confidence: 0.81, highRisks: 0 },
@@ -105,7 +105,7 @@ const SEEDS: OppSeed[] = [
     family: "ai-automation",
     source: "freelancer",
     budget: { type: "fixed", min: 1200, max: 1800 },
-    lineItems: [inf("Build & test workflow", "factory", 20, 6, 40), inf("Classifier evals", "gx", 4, 1, 200), tool("n8n cloud, 1 month", 24)],
+    lineItems: [inf("Build workflow + generated tests", "factory", 20, 6, 40), inf("Classifier checks", "gx", 4, 1, 200), tool("n8n cloud, 1 month", 24)],
     shadowHours: 5,
     signals: { fit: 0.9, complexity: 0.55, revisionRisk: 0.3, deadlineRisk: 0.25, confidence: 0.78, highRisks: 0 },
     posted: "11m",
@@ -114,7 +114,7 @@ const SEEDS: OppSeed[] = [
   },
   {
     id: "op_91be",
-    title: "Localise 8 explainer videos into ES / DE / PT-BR",
+    title: "Localize 8 explainer videos into ES / DE / PT-BR",
     family: "localization-repurposing",
     source: "contra",
     budget: { type: "fixed", min: 1400, max: 1400 },
@@ -122,7 +122,7 @@ const SEEDS: OppSeed[] = [
     shadowHours: 3,
     signals: { fit: 0.78, complexity: 0.4, revisionRisk: 0.4, deadlineRisk: 0.3, confidence: 0.74, highRisks: 0 },
     posted: "26m",
-    deliverables: ["24 localised cuts", "Burned-in + SRT subtitles", "Glossary per language"],
+    deliverables: ["24 localized cuts", "Burned-in + SRT subtitles", "Glossary per language"],
     risks: ["Source project files may not be provided"],
   },
   {
@@ -192,16 +192,16 @@ const SEEDS: OppSeed[] = [
   },
   {
     id: "op_b812",
-    title: "Support RAG bot over 300 help-centre articles",
+    title: "Support RAG bot over 300 help-center articles",
     family: "ai-automation",
     source: "freelancer",
     budget: { type: "fixed", min: 1800, max: 2400 },
-    lineItems: [inf("Build + evals", "factory", 20, 6, 70), inf("Chunking + embeddings QA", "gx", 6, 1, 400), tool("Vector DB, 1 month", 25)],
+    lineItems: [inf("Build + generated eval set", "factory", 20, 6, 70), inf("Chunking + embeddings QA", "gx", 6, 1, 400), tool("Vector DB, 1 month", 25)],
     shadowHours: 5,
     signals: { fit: 0.88, complexity: 0.55, revisionRisk: 0.35, deadlineRisk: 0.25, confidence: 0.77, highRisks: 0 },
     posted: "6m",
-    deliverables: ["Retrieval bot + widget", "Eval set, 60 questions", "Handover doc"],
-    risks: ["Help-centre export format unknown"],
+    deliverables: ["Retrieval bot + widget", "Generated eval set, 60 questions", "Handover doc"],
+    risks: ["Help-center export format unknown"],
   },
   {
     id: "op_6f05",
@@ -213,7 +213,7 @@ const SEEDS: OppSeed[] = [
     shadowHours: 8,
     signals: { fit: 0.85, complexity: 0.5, revisionRisk: 0.4, deadlineRisk: 0.3, confidence: 0.8, highRisks: 0 },
     posted: "19m",
-    deliverables: ["6 responsive pages", "CMS wiring", "Lighthouse ≥ 90 report"],
+    deliverables: ["6 responsive pages", "CMS wiring", "Launch checklist"],
     risks: [],
   },
   {

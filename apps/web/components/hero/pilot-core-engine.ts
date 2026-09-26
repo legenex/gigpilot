@@ -695,20 +695,9 @@ export class PilotCoreEngine {
       ctx.lineTo(core.x + Math.cos(a) * r1, core.y + Math.sin(a) * r1);
       ctx.stroke();
     }
-    if (L.mode === "wide") {
-      ctx.font = `500 9px ${C.mono}`;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillStyle = C.fg3;
-      for (let i = 0; i < 12; i++) {
-        const a = (i / 12) * TAU + this.bezel - PI / 2;
-        ctx.globalAlpha = 0.5;
-        ctx.fillText(String(i * 3), core.x + Math.cos(a) * R * 0.67, core.y + Math.sin(a) * R * 0.67);
-      }
-    }
-    if (!reduced) {
-      // heading bug
-      ctx.globalAlpha = this.bugAlpha;
+    {
+      // heading bug: follows the pointer, otherwise points at the lead job (drawn static under reduced motion)
+      ctx.globalAlpha = reduced ? 0.85 : this.bugAlpha;
       ctx.fillStyle = C.accent;
       const b0 = polar(core.x, core.y, R * 0.875, bug);
       const bl = polar(core.x, core.y, R * 0.945, bug - 0.05);

@@ -21,6 +21,7 @@ import {
 import { chooseCreativeRoute, type RouteChoice } from "@gigpilot/economics";
 import { getSourceAdapter } from "@gigpilot/providers";
 import { listRecentEvents } from "./events";
+import { getTenantMeta } from "./tenant";
 
 export type OpportunityDetail = NonNullable<Awaited<ReturnType<typeof getOpportunityDetail>>>;
 
@@ -72,10 +73,13 @@ export async function getOpportunityDetail(tenantId: string, id: string) {
     }
   }
 
-  const events = await listRecentEvents(tenantId, {
-    limit: 30,
-    subjectIds: [opp.id, ...proposals.map((p) => p.id), ...(app ? [app.id] : [])],
-  });
+  const [events, meta] = await Promise.all([
+    listRecentEvents(tenantId, {
+      limit: 30,
+      subjectIds: [opp.id, ...proposals.map((p) => p.id), ...(app ? [app.id] : [])],
+    }),
+    getTenantMeta(tenantId),
+  ]);
 
   return {
     opp,
@@ -93,5 +97,7 @@ export async function getOpportunityDetail(tenantId: string, id: string) {
     routes,
     events,
     autoSubmit: Boolean(capabilities?.canSubmit && settings.autonomy.autoSubmitWhenPermitted),
+    /** Rows created before this are seeded sample history. */
+    sampleBefore: meta.createdAt.toISOString(),
   };
 }

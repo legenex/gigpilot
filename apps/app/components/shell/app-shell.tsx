@@ -231,8 +231,11 @@ function RailContent({
             <span className="truncate text-xs font-medium text-fg-2" title={tenantName}>
               {tenantName}
             </span>
-            <span className={cn("shrink-0 rounded-[3px] px-1 font-mono text-[9.5px] font-medium uppercase tracking-[0.08em] ring-1 ring-inset", tenantMode === "demo" ? "text-info ring-info/30" : "text-profit ring-profit/30")}>
-              {tenantMode}
+            <span
+              className={cn("shrink-0 rounded-[3px] px-1.5 font-mono text-[11px] font-medium uppercase leading-[18px] tracking-[0.06em] ring-1 ring-inset", tenantMode === "demo" ? "text-info ring-info/30" : "text-profit ring-profit/30")}
+              title={tenantMode === "demo" ? "Demo mode — sources are the demo marketplace; no real submissions or spend" : "Live mode — configured integrations"}
+            >
+              {tenantMode === "demo" ? "Demo mode" : "Live"}
             </span>
           </div>
         </div>
@@ -261,7 +264,7 @@ function RailContent({
       <nav className={cn("min-h-0 flex-1 overflow-y-auto pb-3", collapsed ? "px-2" : "px-2.5")} aria-label="Main">
         {NAV_GROUPS.map((group) => (
           <div key={group} className="mt-3 first:mt-1">
-            {!collapsed ? <p className="px-2 pb-1 font-mono text-[10px] font-medium uppercase tracking-[0.1em] text-fg-3">{group}</p> : <div className="mx-2 mb-2 h-px bg-line" />}
+            {!collapsed ? <p className="px-2 pb-1 font-mono text-[11px] font-medium uppercase tracking-[0.08em] text-fg-3">{group}</p> : <div className="mx-2 mb-2 h-px bg-line" />}
             <ul className="flex flex-col gap-px">
               {NAV.filter((n) => n.group === group).map((item) => {
                 const active = isActive(pathname, item.href);
@@ -273,7 +276,7 @@ function RailContent({
                     data-testid={item.testId}
                     aria-current={active ? "page" : undefined}
                     className={cn(
-                      "group relative flex h-8 items-center gap-2.5 rounded-sm text-[13px] outline-none transition-colors duration-150",
+                      "group relative flex h-8 items-center gap-2.5 rounded-sm text-[13px] transition-colors duration-150 focus-inset",
                       collapsed ? "justify-center" : "px-2",
                       active ? "bg-surface-2 text-fg" : "text-fg-2 hover:bg-surface-1 hover:text-fg",
                     )}
@@ -282,7 +285,7 @@ function RailContent({
                     <Icon className={cn("size-4 shrink-0", active ? "text-fg" : "text-fg-3 group-hover:text-fg-2")} strokeWidth={1.75} />
                     {!collapsed ? <span className="flex-1 truncate">{item.label}</span> : null}
                     {!collapsed && count > 0 ? (
-                      <span className="min-w-5 rounded-[4px] bg-surface-3 px-1 text-center font-mono text-[10.5px] leading-[18px] tabular text-fg-2">{count}</span>
+                      <span className="min-w-5 rounded-[4px] bg-surface-3 px-1 text-center font-mono text-[11px] leading-[18px] tabular text-fg-2">{count}</span>
                     ) : null}
                     {collapsed && count > 0 ? <span className="absolute right-1.5 top-1.5 size-1.5 rounded-full bg-fg-2" aria-label={`${count} pending`} /> : null}
                   </Link>

@@ -23,11 +23,37 @@ import {
   providerMetric,
   qaReview,
   repair,
+  tenant,
   workflow,
   workflowStep,
   type EconomicsBreakdown,
   type MarketMetrics,
 } from "./schema";
+
+/**
+ * Sample-data contract (dashboard): every row the demo seeder writes has
+ * `created_at` strictly BEFORE the tenant's `created_at`, is attributed to
+ * provider `sample` / model `sample-history` (never a real provider), and
+ * seeded audit events use actor system/`demo-seed`. So "sample" is simply
+ * `created_at < tenant.created_at` (see isSampleRecord / tenantSampleCutoff).
+ */
+export const SAMPLE_PROVIDER = "sample";
+export const SAMPLE_MODEL = "sample-history";
+export const SAMPLE_ACTOR_ID = "demo-seed";
+
+/** True when a record is seeded sample history (created before its workspace existed). */
+export function isSampleRecord(createdAt: Date | string | null | undefined, tenantCreatedAt: Date | string | null | undefined): boolean {
+  if (!createdAt || !tenantCreatedAt) return false;
+  const a = createdAt instanceof Date ? createdAt.getTime() : Date.parse(createdAt);
+  const b = tenantCreatedAt instanceof Date ? tenantCreatedAt.getTime() : Date.parse(tenantCreatedAt);
+  return Number.isFinite(a) && Number.isFinite(b) && a < b;
+}
+
+/** The workspace's sample cutoff: rows with created_at < this are seeded sample history. Null when the tenant is unknown. */
+export async function tenantSampleCutoff(db: Executor, tenantId: string): Promise<Date | null> {
+  const [t] = await db.select({ createdAt: tenant.createdAt }).from(tenant).where(eq(tenant.id, tenantId)).limit(1);
+  return t?.createdAt ?? null;
+}
 
 /**
  * Demo history seeder. Gives a new demo workspace ~30 days of realistic,
@@ -301,6 +327,9 @@ const MARKET_METRICS: Record<Family, { metrics: MarketMetrics; recommended: numb
   "research-content": { recommended: 10, metrics: { opportunitiesPerDay: 4.0, avgBudgetUsd: 1180, avgMargin: 0.69, avgProfitUsd: 760, competition: 0.47, winRate: 0.29, fulfilmentReliability: 0.91, avgTurnaroundDays: 6.0, demandTrend: "down" } },
 };
 
+/** Market metrics the seeder writes (clearSampleData resets markets still carrying exactly these). */
+export const SAMPLE_MARKET_METRICS: Readonly<Record<string, { metrics: MarketMetrics; recommended: number }>> = MARKET_METRICS;
+
 const DAY = 86_400_000;
 const r2 = (n: number) => Math.round(n * 100) / 100;
 const r4 = (n: number) => Math.round(n * 10_000) / 10_000;
@@ -326,6 +355,9 @@ function economics(input: { price: number; sourceKey: string; creative: Creative
       attempts: c.estAttempts,
       totalUsd: r2(c.unitCostUsd * c.units * c.estAttempts),
       priceSource: "catalog 2026-09-26",
+      routeStatus: "simulated" as const,
+      routeNote: "sample history — no generation ran",
+      capability: c.capability,
     })),
     {
       category: "inference" as const,
@@ -338,6 +370,8 @@ function economics(input: { price: number; sourceKey: string; creative: Creative
       attempts: 1,
       totalUsd: r2(input.inference.estUsd),
       priceSource: "inference catalog",
+      routeStatus: "simulated" as const,
+      routeNote: "sample history — no model call ran",
     },
   ];
   const creativeUsd = input.creative.reduce((a, c) => a + c.unitCostUsd * c.units * c.estAttempts, 0);
@@ -402,8 +436,10 @@ export async function seedDemoHistory(db: Executor, tenantId: string): Promise<v
   const [existing] = await db.select({ n: sql<number>`count(*)::int` }).from(job).where(eq(job.tenantId, tenantId));
   if (Number(existing?.n ?? 0) > 0) return;
 
-  const now = Date.now();
-  const at = (daysAgo: number, hours = 0) => new Date(now - daysAgo * DAY + hours * 3_600_000);
+  // Everything seeded happens strictly BEFORE the workspace existed (sample-data contract).
+  const cutoff = (await tenantSampleCutoff(db, tenantId)) ?? new Date();
+  const now = Math.min(Date.now(), cutoff.getTime()) - 60_000;
+  const at = (daysAgo: number, hours = 0) => new Date(Math.min(now, now - daysAgo * DAY + hours * 3_600_000));
   const s = defaultTenantSettings();
 
   const rows = {
@@ -462,7 +498,7 @@ export async function seedDemoHistory(db: Executor, tenantId: string): Promise<v
       expiresAt: new Date(o.postedAt.getTime() + 14 * DAY),
       status: o.status,
       dedupeHash: `demo${id.replace(/-/g, "").slice(0, 12)}`,
-      raw: { demo: true, history: true },
+      raw: { demo: true, history: true, sample: true },
       expectedProfitUsd: b.grossProfitUsd,
       expectedMargin: b.grossMargin,
       estimatedCostUsd: b.totalCostUsd,
@@ -474,7 +510,7 @@ export async function seedDemoHistory(db: Executor, tenantId: string): Promise<v
       createdAt: o.postedAt,
       updatedAt: o.postedAt,
     });
-    rows.analysis.push({ id: analysisId, tenantId, opportunityId: id, version: 1, analysis: o.analysis, provider: "gx", model: "gx-code", createdAt: new Date(o.postedAt.getTime() + 600_000) });
+    rows.analysis.push({ id: analysisId, tenantId, opportunityId: id, version: 1, analysis: o.analysis, provider: SAMPLE_PROVIDER, model: SAMPLE_MODEL, createdAt: new Date(o.postedAt.getTime() + 600_000) });
     rows.estimate.push({ id: estimateId, tenantId, opportunityId: id, analysisId, breakdown: b, totalCostUsd: b.totalCostUsd, grossProfitUsd: b.grossProfitUsd, grossMargin: b.grossMargin, complete: true, createdAt: new Date(o.postedAt.getTime() + 620_000) });
     rows.score.push({
       tenantId,
@@ -510,8 +546,8 @@ export async function seedDemoHistory(db: Executor, tenantId: string): Promise<v
       assumptions: ["One consolidated revision round; further changes quoted as a change order."],
       questions: [],
       status: "approved",
-      provider: "gx",
-      model: "gx-code",
+      provider: SAMPLE_PROVIDER,
+      model: SAMPLE_MODEL,
       approvedBy: null,
       approvedAt: o.approvedAt,
       createdAt: new Date(o.approvedAt.getTime() - 3_600_000),
@@ -589,6 +625,8 @@ export async function seedDemoHistory(db: Executor, tenantId: string): Promise<v
 
     const creativeByKey: Record<string, CreativeLine | undefined> = { asset_a: h.creative[0], asset_b: h.creative[1] ?? h.creative[0] };
     const stepIds = new Map<string, string>();
+    // Inference cost of the job sits on ONE step (never spread over "gx" steps that cost $0).
+    const inferenceKeys = h.family === "localization-repurposing" ? ["translate_a", "translate_b"] : h.family === "research-content" ? ["research"] : h.family === "ai-automation" || h.family === "web-app-builds" ? ["implement"] : ["concepts"];
     steps.forEach((st, i) => {
       const id = randomUUID();
       stepIds.set(st.key, id);
@@ -597,7 +635,7 @@ export async function seedDemoHistory(db: Executor, tenantId: string): Promise<v
       const isRepaired = h.repaired?.stepKey === st.key;
       const isQa = st.agent === "qa";
       const cl = st.kind === "generate" ? creativeByKey[st.key] : undefined;
-      const stepCost = cl ? (st.key === "asset_b" && h.creative.length === 1 ? 0 : cl.generations * cl.unitCostUsd) : st.kind === "code" || st.kind === "translate" || st.kind === "research" ? inferenceActual / (st.kind === "translate" ? 2 : 1) : 0;
+      const stepCost = cl ? (st.key === "asset_b" && h.creative.length === 1 ? 0 : cl.generations * cl.unitCostUsd) : inferenceKeys.includes(st.key) && h.inference.family !== "gx" ? inferenceActual / inferenceKeys.length : 0;
       const attempts = isRepaired || (isQa && h.repaired) ? 2 : 1;
       rows.step.push({
         id,
@@ -613,13 +651,13 @@ export async function seedDemoHistory(db: Executor, tenantId: string): Promise<v
         status: "succeeded",
         attempts,
         maxAttempts: isQa ? s.limits.maxRepairsPerJob + 1 : s.limits.maxStepAttempts,
-        provider: cl ? cl.provider : st.kind === "code" ? h.inference.family : "gx",
-        model: cl ? cl.model : st.kind === "code" ? h.inference.model : "gx-code",
+        provider: SAMPLE_PROVIDER,
+        model: SAMPLE_MODEL,
         estimatedCostUsd: r4(cl ? cl.units * cl.unitCostUsd * cl.estAttempts * (h.creative.length === 1 ? 0.5 : 1) : st.kind === "code" ? h.inference.estUsd : 0),
         actualCostUsd: r4(stepCost),
         acceptance: isQa ? ["Every deliverable passes format checks", "Matches the brief"] : [],
-        input: { family: h.family, history: true, ...(cl ? { aspectRatio: cl.aspect, units: cl.units } : {}) },
-        output: { summary: `${st.name} completed`, history: true },
+        input: { family: h.family, history: true, sample: true, ...(cl ? { aspectRatio: cl.aspect, units: cl.units } : {}) },
+        output: { summary: `${st.name} completed (sample history)`, history: true, sample: true },
         position: i,
         startedAt: started,
         finishedAt: finished,
@@ -638,12 +676,12 @@ export async function seedDemoHistory(db: Executor, tenantId: string): Promise<v
           stepId: id,
           status: "succeeded",
           attempt: a,
-          provider: cl ? cl.provider : st.kind === "code" ? h.inference.family : "gx",
-          model: cl ? cl.model : st.kind === "code" ? h.inference.model : "gx-code",
+          provider: SAMPLE_PROVIDER,
+          model: SAMPLE_MODEL,
           inputTokens: cl ? 0 : 5200 + i * 700,
           outputTokens: cl ? 0 : 1400 + i * 210,
           costUsd: r4(a === attempts ? stepCost / attempts : stepCost / attempts),
-          summary: `${st.name} ${isQa && a === 1 && h.repaired ? "found 1 issue" : "completed"}`,
+          summary: `${st.name} ${isQa && a === 1 && h.repaired ? "found 1 issue" : "completed"} (sample history)`,
           idempotencyKey: `step:${id}:${a}`,
           startedAt: runStart,
           finishedAt: new Date(runStart.getTime() + 20 * 60_000),
@@ -663,11 +701,11 @@ export async function seedDemoHistory(db: Executor, tenantId: string): Promise<v
           tenantId,
           jobId,
           stepId,
-          provider: cl.provider,
-          model: cl.model,
+          provider: SAMPLE_PROVIDER,
+          model: SAMPLE_MODEL,
           capability: cl.capability,
           // Simulated history: excluded from provider_metric so it never steers real routing.
-          params: { aspectRatio: cl.aspect, history: true, simulated: true },
+          params: { aspectRatio: cl.aspect, history: true, simulated: true, sample: true, catalogRoute: `${cl.provider}/${cl.model}` },
           estimatedCostUsd: cl.unitCostUsd,
           actualCostUsd: cl.unitCostUsd,
           costSource: "catalog",
@@ -675,7 +713,7 @@ export async function seedDemoHistory(db: Executor, tenantId: string): Promise<v
           latencyMs: cl.capability.startsWith("video") ? 112_000 + (g % 5) * 9_000 : 21_000 + (g % 5) * 3_000,
           qaPassed: usable,
           repairOfId: null,
-          routeRationale: `${cl.provider}/${cl.model}: cheapest route clearing quality 0.72`,
+          routeRationale: `Sample history (no generation ran) — priced at the ${cl.provider}/${cl.model} catalog rate`,
           idempotencyKey: `demo-gen:${stepId}:${g}`,
           createdAt: created,
           updatedAt: created,
@@ -690,7 +728,7 @@ export async function seedDemoHistory(db: Executor, tenantId: string): Promise<v
       const target = stepIds.get(h.repaired.stepKey)!;
       const qaFailId = randomUUID();
       const finding: QAFinding = { code: h.repaired.code, severity: "major", message: h.repaired.message, repairHint: h.repaired.hint };
-      rows.qa.push({ id: qaFailId, tenantId, jobId, stepId: target, reviewer: "qa", provider: "gx", model: "gx-mini", verdict: "fail", score: 0.61, findings: [finding], summary: h.repaired.message, attempt: 1, createdAt: qaAt });
+      rows.qa.push({ id: qaFailId, tenantId, jobId, stepId: target, reviewer: "qa", provider: SAMPLE_PROVIDER, model: SAMPLE_MODEL, verdict: "fail", score: 0.61, findings: [finding], summary: `${h.repaired.message} (sample history)`, attempt: 1, independence: "deterministic_only", createdAt: qaAt });
       rows.repair.push({
         tenantId,
         jobId,
@@ -710,9 +748,9 @@ export async function seedDemoHistory(db: Executor, tenantId: string): Promise<v
     }
     const passAt = new Date(qaAt.getTime() + (h.repaired ? 3.2 : 0.2) * 3_600_000);
     for (const t of reviewTargets) {
-      rows.qa.push({ tenantId, jobId, stepId: stepIds.get(t.key)!, reviewer: "qa", provider: "gx", model: "gx-mini", verdict: "pass", score: 0.92, findings: [], summary: `${t.name}: meets the acceptance criteria`, attempt: h.repaired ? 2 : 1, createdAt: passAt });
+      rows.qa.push({ tenantId, jobId, stepId: stepIds.get(t.key)!, reviewer: "qa", provider: SAMPLE_PROVIDER, model: SAMPLE_MODEL, verdict: "pass", score: 0.92, findings: [], summary: `${t.name}: no blocking findings (sample history)`, attempt: h.repaired ? 2 : 1, independence: "deterministic_only", createdAt: passAt });
     }
-    ev({ type: "qa.passed", level: "success", agent: "qa", jobId, subjectType: "job", subjectId: jobId, message: `Independent QA passed ${reviewTargets.length}/${reviewTargets.length} deliverable checks for '${h.title}'`, createdAt: passAt });
+    ev({ type: "qa.passed", level: "success", agent: "qa", jobId, subjectType: "job", subjectId: jobId, message: `Sample history: QA passed ${reviewTargets.length}/${reviewTargets.length} deliverable checks for '${h.title}'`, data: { sample: true }, createdAt: passAt });
 
     const deliveryId = randomUUID();
     const files = h.deliverables.map((d) => `${d.item} ×${d.quantity}`).join(", ");
@@ -722,8 +760,8 @@ export async function seedDemoHistory(db: Executor, tenantId: string): Promise<v
       jobId,
       status: "approved",
       packageAssetId: null,
-      manifest: { items: [], notes: `Delivered (archived demo history): ${files}.`, qaSummary: `${reviewTargets.length}/${reviewTargets.length} deliverable checks passed independent QA${h.repaired ? ", 1 repair applied" : ""}` },
-      clientMessage: `Hi ${h.client} team, your delivery for “${h.title}” is ready — every file was checked independently against the brief.`,
+      manifest: { items: [], notes: `Sample history (seeded demo data, no files): ${files}.`, qaSummary: `Sample history: ${reviewTargets.length}/${reviewTargets.length} deliverable checks recorded as passed${h.repaired ? ", 1 repair applied" : ""}` },
+      clientMessage: `Sample history — seeded demo data for “${h.title}”; no real client message was drafted or sent.`,
       approvedBy: null,
       approvedAt: deliveredAt,
       createdAt: new Date(deliveredAt.getTime() - 5 * 3_600_000),
@@ -739,24 +777,25 @@ export async function seedDemoHistory(db: Executor, tenantId: string): Promise<v
       { tenantId, jobId, opportunityId: oppId, category: "creative", kind: "estimate", amountUsd: r4(econ.creativeUsd), memo: "Planned creative production (catalog prices)", createdAt: estAt },
       { tenantId, jobId, opportunityId: oppId, category: "inference", kind: "estimate", amountUsd: r4(econ.inferenceUsd), memo: "Planned inference (catalog prices)", createdAt: estAt },
       { tenantId, jobId, opportunityId: oppId, category: "human_shadow", kind: "estimate", amountUsd: b.shadowCostUsd, memo: "Owner review & coordination time (shadow rate)", createdAt: estAt },
-      { tenantId, jobId, opportunityId: oppId, category: "inference", kind: "actual", provider: h.inference.family, model: h.inference.model, amountUsd: inferenceActual, paid: false, memo: `${h.inference.task} (demo history — no real spend)`, createdAt: new Date(startedAt.getTime() + spanMs * 0.5) },
+      { tenantId, jobId, opportunityId: oppId, category: "inference", kind: "actual", provider: SAMPLE_PROVIDER, model: SAMPLE_MODEL, amountUsd: inferenceActual, paid: false, memo: `${h.inference.task} — sample history at ${h.inference.family} catalog rates (no real spend)`, createdAt: new Date(startedAt.getTime() + spanMs * 0.5) },
       ...(creativeActual > 0
-        ? [{ tenantId, jobId, opportunityId: oppId, category: "creative" as const, kind: "actual" as const, provider: h.creative[0]!.provider, model: h.creative[0]!.model, amountUsd: r4(creativeActual), paid: false, memo: "Creative generations (demo history — no real spend)", createdAt: new Date(startedAt.getTime() + spanMs * 0.5) }]
+        ? [{ tenantId, jobId, opportunityId: oppId, category: "creative" as const, kind: "actual" as const, provider: SAMPLE_PROVIDER, model: SAMPLE_MODEL, amountUsd: r4(creativeActual), paid: false, memo: `Creative generations — sample history at ${h.creative[0]!.provider}/${h.creative[0]!.model} catalog rates (no real spend)`, createdAt: new Date(startedAt.getTime() + spanMs * 0.5) }]
         : []),
       { tenantId, jobId, opportunityId: oppId, category: "revenue", kind: "actual", amountUsd: h.price, memo: "Contract value (delivered)", createdAt: deliveredAt },
       { tenantId, jobId, opportunityId: oppId, category: "marketplace_fee", kind: "actual", provider: "mock", amountUsd: fee, memo: "mock fee", createdAt: deliveredAt },
     );
 
-    ev({ type: "application.won", level: "success", agent: "client", subjectType: "application", subjectId: appId, message: `Won: ${h.title}`, createdAt: at(startDay) });
+    ev({ type: "application.won", level: "success", agent: "client", subjectType: "application", subjectId: appId, message: `Sample history — won: ${h.title}`, data: { sample: true }, createdAt: at(startDay) });
     ev({ type: "job.created", level: "success", agent: "orchestrator", jobId, subjectType: "job", subjectId: jobId, message: `Job opened: ${h.title}`, createdAt: at(startDay, 0.1) });
     ev({ type: "workflow.planned", agent: "planner", jobId, subjectType: "job", subjectId: jobId, message: `Planned ${steps.length}-step workflow for '${h.title}' — est. production $${estimatedCostUsd.toFixed(2)}`, createdAt: at(startDay, 0.5) });
     ev({ type: "delivery.prepared", level: "success", agent: "finisher", jobId, subjectType: "delivery", subjectId: deliveryId, message: `Delivery package ready for '${h.title}'`, createdAt: new Date(deliveredAt.getTime() - 5 * 3_600_000) });
     ev({ type: "cost.recorded", agent: "economics", jobId, subjectType: "job", subjectId: jobId, message: `Production cost for '${h.title}': $${actualCostUsd.toFixed(2)} actual vs $${estimatedCostUsd.toFixed(2)} estimated`, createdAt: new Date(deliveredAt.getTime() - 5 * 3_600_000) });
     ev({ type: "delivery.approved", level: "success", agent: "client", jobId, subjectType: "delivery", subjectId: deliveryId, message: "Owner approved final delivery", createdAt: deliveredAt });
+    // Seeded audit rows are system/demo-seed — never fake user actions.
     rows.audit.push(
-      { tenantId, actorType: "user", action: "delivery.transition", subjectType: "delivery", subjectId: deliveryId, fromState: "prepared", toState: "approved", createdAt: deliveredAt },
-      { tenantId, actorType: "user", action: "job.transition", subjectType: "job", subjectId: jobId, fromState: "awaiting_final_approval", toState: "delivered", createdAt: deliveredAt },
-      ...(h.status === "closed" ? [{ tenantId, actorType: "user" as const, action: "job.transition", subjectType: "job", subjectId: jobId, fromState: "delivered", toState: "closed", createdAt: new Date(deliveredAt.getTime() + 2 * DAY) }] : []),
+      { tenantId, actorType: "system", actorId: SAMPLE_ACTOR_ID, action: "delivery.transition", subjectType: "delivery", subjectId: deliveryId, fromState: "prepared", toState: "approved", data: { sample: true }, createdAt: deliveredAt },
+      { tenantId, actorType: "system", actorId: SAMPLE_ACTOR_ID, action: "job.transition", subjectType: "job", subjectId: jobId, fromState: "awaiting_final_approval", toState: "delivered", data: { sample: true }, createdAt: deliveredAt },
+      ...(h.status === "closed" ? [{ tenantId, actorType: "system" as const, actorId: SAMPLE_ACTOR_ID, action: "job.transition", subjectType: "job", subjectId: jobId, fromState: "delivered", toState: "closed", data: { sample: true }, createdAt: at(Math.max(0, h.deliveredDaysAgo - 2)) }] : []),
     );
   }
 
@@ -786,7 +825,7 @@ export async function seedDemoHistory(db: Executor, tenantId: string): Promise<v
       createdAt: approvedAt,
       updatedAt: at(Math.max(0, a.daysAgo - 0.5)),
     });
-    ev({ type: "application.submitted", level: "success", agent: "client", subjectType: "application", subjectId: appId, message: `Submitted '${a.title}' to Demo marketplace at $${a.price.toLocaleString("en-US")} (demo marketplace)`, createdAt: at(a.daysAgo + 0.7) });
+    ev({ type: "application.submitted", level: "success", agent: "client", subjectType: "application", subjectId: appId, message: `Sample history — submitted '${a.title}' to the demo marketplace at $${a.price.toLocaleString("en-US")}`, data: { sample: true }, createdAt: at(a.daysAgo + 0.7) });
     if (a.status === "lost") ev({ type: "application.lost", agent: "client", subjectType: "application", subjectId: appId, message: `Application lost: ${a.title}`, createdAt: at(Math.max(0, a.daysAgo - 0.5)) });
   }
 
@@ -794,6 +833,8 @@ export async function seedDemoHistory(db: Executor, tenantId: string): Promise<v
   const runAgg = new Map<string, { provider: string; model: string; attempts: number; cost: number }>();
   for (const r of rows.run) {
     if (!r.provider || !r.model || ["kie", "higgsfield", "mock"].includes(r.provider)) continue;
+    // Only steps that carried inference count (sample creative steps are not inference).
+    if (r.task === "step.generate") continue;
     const k = `${r.provider}|${r.model}`;
     const m = runAgg.get(k) ?? { provider: r.provider, model: r.model, attempts: 0, cost: 0 };
     m.attempts++;
@@ -872,15 +913,15 @@ export async function seedDemoHistory(db: Executor, tenantId: string): Promise<v
         .set({ metrics: MARKET_METRICS[k].metrics, recommendedAllocationPct: MARKET_METRICS[k].recommended })
         .where(sql`${market.tenantId} = ${tenantId} and ${market.key} = ${k}`);
     }
-    await tx.insert(marketInsight).values({ tenantId, headline: insight.headline, summary: insight.summary, body: insight, provider: "gx", model: "gx-code", createdAt: at(0.2) });
-    await tx.insert(agentEvent).values({ tenantId, type: "market.insight", level: "info", agent: "market_research", subjectType: "market", message: `Market research: ${insight.summary.split(". ")[0]}.`, createdAt: at(0.2) });
+    await tx.insert(marketInsight).values({ tenantId, headline: `Sample: ${insight.headline}`, summary: `Sample history (seeded demo data): ${insight.summary}`, body: { ...insight, webResearch: "none" }, provider: SAMPLE_PROVIDER, model: SAMPLE_MODEL, createdAt: at(0.2) });
+    await tx.insert(agentEvent).values({ tenantId, type: "market.insight", level: "info", agent: "market_research", subjectType: "market", message: `Sample history — market research: ${insight.summary.split(". ")[0]}.`, data: { sample: true }, createdAt: at(0.2) });
     await chunked(auditEvent, [
       ...rows.audit,
-      { tenantId, actorType: "system", action: "tenant.demo_seeded", subjectType: "tenant", subjectId: tenantId, data: { jobs: JOBS.length, applications: APPS.length }, createdAt: new Date() },
+      { tenantId, actorType: "system", actorId: SAMPLE_ACTOR_ID, action: "tenant.demo_seeded", subjectType: "tenant", subjectId: tenantId, data: { jobs: JOBS.length, applications: APPS.length, sample: true }, createdAt: at(0) },
     ]);
     await tx.insert(notification).values([
-      { tenantId, kind: "info", title: "Market insight: shift sourcing toward AI automation", body: insight.summary.slice(0, 400), link: "/markets", dedupeKey: "demo-seed:insight" },
-      { tenantId, kind: "success", title: `Delivered: ${JOBS[JOBS.length - 1]!.title}`, body: "The client approved the delivery package. Close the job once payment clears.", link: "/jobs", dedupeKey: "demo-seed:delivered" },
+      { tenantId, kind: "info", title: "Sample data: market insight (seeded demo history)", body: `Sample history — ${insight.summary}`.slice(0, 400), link: "/markets", dedupeKey: "demo-seed:insight", createdAt: at(0.01) },
+      { tenantId, kind: "info", title: `Sample data: delivered job “${JOBS[JOBS.length - 1]!.title.slice(0, 60)}”`, body: "Seeded demo history — no real client or delivery. Clear sample data in Settings when you no longer need it.", link: "/jobs", dedupeKey: "demo-seed:delivered", createdAt: at(0.01) },
     ]);
   };
 

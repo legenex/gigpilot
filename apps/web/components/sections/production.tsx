@@ -9,7 +9,7 @@ export function ProductionSection() {
       <SectionIntro
         id="production-title"
         title="Work that checks itself before you see it."
-        lead="The Production Planner compiles each accepted job into a DAG of specialist steps. The QA Evaluator reviews every output independently, and when something fails, Recovery diagnoses it and repairs, regenerates or reroutes — inside hard limits."
+        lead="The Production Planner compiles each accepted job into a DAG of specialist steps. A separate QA Evaluator step reviews every output against the brief, and when something fails, Recovery diagnoses it and repairs, regenerates or reroutes — inside hard limits."
         aside={
           <dl className="mt-6 grid grid-cols-3 gap-x-4 border-t border-line pt-4">
             {[

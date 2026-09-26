@@ -109,11 +109,18 @@ export async function runMarketResearchAll(deps: AgentDeps) {
 
 const PURGED_TEXT = "[Content purged — the source's terms limit how long listing content may be cached. Derived analysis and economics are retained.]";
 
+/** Title left on a purged listing (the source's ToS require deleting the content, incl. the title). */
+export function purgedTitle(sourceKey: string, sourceName?: string): string {
+  const name = sourceKey === "upwork" ? "Upwork" : (sourceName ?? sourceKey.charAt(0).toUpperCase() + sourceKey.slice(1));
+  return `[${name} listing — expired from cache]`;
+}
+
 export async function runOpportunityExpire(deps: AgentDeps) {
   const db = getDb();
   const now = deps.now();
   let expired = 0;
   let purged = 0;
+  let applicationsExpired = 0;
   for (const tenantId of await listTenantIds(db)) {
     const settings = await getTenantSettings(db, tenantId);
     const candidates = await db
@@ -138,6 +145,45 @@ export async function runOpportunityExpire(deps: AgentDeps) {
         deps.log.warn({ opportunityId: o.id, error: safeError(err) }, "expire transition skipped");
       }
     }
+    // Applications that went quiet: submitted / client_response with no update for N days → expired (audited).
+    const staleBefore = new Date(now.getTime() - settings.sourcing.applicationExpiryDays * 86_400_000);
+    const quiet = await db
+      .select({ id: application.id, opportunityId: application.opportunityId, status: application.status, updatedAt: application.updatedAt })
+      .from(application)
+      .where(and(eq(application.tenantId, tenantId), inArray(application.status, ["submitted", "client_response"]), lt(application.updatedAt, staleBefore)))
+      .limit(500);
+    for (const a of quiet) {
+      try {
+        await db.transaction(async (tx) => {
+          await transition(tx, {
+            machine: "application",
+            id: a.id,
+            tenantId,
+            to: "expired",
+            actor: { type: "system", id: "expiry" },
+            reason: `no update for ${settings.sourcing.applicationExpiryDays} days`,
+            expectFrom: ["submitted", "client_response"],
+            patch: { decidedAt: now },
+            event: {
+              type: "application.lost",
+              level: "info",
+              agent: "client",
+              subjectType: "application",
+              subjectId: a.id,
+              message: `Application expired — no client update for ${settings.sourcing.applicationExpiryDays} days (last ${a.updatedAt.toISOString().slice(0, 10)})`,
+              data: { expired: true, days: settings.sourcing.applicationExpiryDays },
+            },
+          });
+          const [o] = await tx.select({ status: opportunity.status }).from(opportunity).where(eq(opportunity.id, a.opportunityId)).limit(1);
+          if (o?.status === "applied") {
+            await transition(tx, { machine: "opportunity", id: a.opportunityId, tenantId, to: "expired", actor: { type: "system", id: "expiry" }, reason: "application expired without a client response" });
+          }
+        });
+        applicationsExpired++;
+      } catch (err) {
+        deps.log.warn({ applicationId: a.id, error: safeError(err) }, "application expiry skipped");
+      }
+    }
   }
   // Purge cached content whose per-item cache window has passed (e.g. Upwork sets raw.cacheExpiresAt = fetched + 24h).
   const itemExpired = await db
@@ -155,7 +201,13 @@ export async function runOpportunityExpire(deps: AgentDeps) {
     const raw = (r.raw ?? {}) as Record<string, unknown>;
     await db
       .update(opportunity)
-      .set({ description: PURGED_TEXT, raw: { purgedAt: now.toISOString(), purgeReason: `cache window ended ${String(raw.cacheExpiresAt)}`, triageBudget: raw.triageBudget ?? null } })
+      .set({
+        title: purgedTitle(r.sourceKey, typeof raw.sourceName === "string" ? raw.sourceName : undefined),
+        description: PURGED_TEXT,
+        clientName: null,
+        url: null,
+        raw: { purgedAt: now.toISOString(), purgeReason: `cache window ended ${String(raw.cacheExpiresAt)}`, triageBudget: raw.triageBudget ?? null },
+      })
       .where(eq(opportunity.id, r.id));
     await audit(db, { tenantId: r.tenantId, actor: { type: "system", id: "cache-ttl" }, action: "opportunity.content_purged", subjectType: "opportunity", subjectId: r.id, data: { source: r.sourceKey, cacheExpiresAt: raw.cacheExpiresAt } });
     purged++;
@@ -174,13 +226,13 @@ export async function runOpportunityExpire(deps: AgentDeps) {
       const raw = (r.raw ?? {}) as Record<string, unknown>;
       await db
         .update(opportunity)
-        .set({ description: PURGED_TEXT, raw: { purgedAt: now.toISOString(), purgeReason: `${adapter.name} cache TTL ${ttl}h`, triageBudget: raw.triageBudget ?? null } })
+        .set({ title: purgedTitle(adapter.key, adapter.name), description: PURGED_TEXT, clientName: null, url: null, raw: { purgedAt: now.toISOString(), purgeReason: `${adapter.name} cache TTL ${ttl}h`, triageBudget: raw.triageBudget ?? null } })
         .where(eq(opportunity.id, r.id));
       await audit(db, { tenantId: r.tenantId, actor: { type: "system", id: "cache-ttl" }, action: "opportunity.content_purged", subjectType: "opportunity", subjectId: r.id, data: { source: adapter.key, ttlHours: ttl } });
       purged++;
     }
   }
-  return { expired, purged };
+  return { expired, purged, applicationsExpired };
 }
 
 // ---------------------------------------------------------------------------
@@ -569,6 +621,7 @@ export async function runMetricsRollup(_deps: AgentDeps) {
       coalesce(avg(latency_ms), 0) as avg_latency
     from generation
     where provider <> 'pending'
+      and provider <> 'sample'
       and coalesce(params ->> 'simulated', 'false') <> 'true'
       and coalesce(params ->> 'history', 'false') <> 'true'
     group by tenant_id, provider, model, capability
@@ -582,6 +635,7 @@ export async function runMetricsRollup(_deps: AgentDeps) {
       coalesce(avg(extract(epoch from (finished_at - started_at)) * 1000) filter (where finished_at is not null and started_at is not null), 0) as avg_latency
     from agent_run
     where provider is not null and model is not null and tenant_id is not null
+      and provider not in ('sample', 'heuristic', 'deterministic')
     group by tenant_id, provider, model
   `)) as unknown as GenAgg[];
   let upserts = 0;

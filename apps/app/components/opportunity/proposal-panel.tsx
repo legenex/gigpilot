@@ -5,6 +5,7 @@ import { useState } from "react";
 import { ArrowRight, Check, Pencil, RotateCcw, Send, ShieldCheck, X } from "lucide-react";
 import { Button, Callout, Dialog, DialogContent, Field, Input, StatusDot, Textarea, cn, formatUsd } from "@gigpilot/ui";
 import { approveProposalAction, rejectProposalAction, requestProposalAction, updateProposalAction } from "@/lib/actions/opportunities";
+import { routeId, routeLabel } from "@/lib/labels";
 import { useAction } from "@/lib/use-action";
 
 export interface ProposalView {
@@ -75,17 +76,7 @@ export function ProposalPanel({
           <StatusDot tone={drafting ? "info" : "neutral"} live={drafting} />
           {drafting ? "Proposal Agent is drafting a tailored proposal…" : "No proposal yet. Approve pursuit and the Proposal Agent drafts one for your review."}
         </p>
-        {drafting ? (
-          <Button
-            size="sm"
-            variant="ghost"
-            className="mt-2"
-            loading={pending}
-            onClick={() => run(() => requestProposalAction(oppId))}
-          >
-            <RotateCcw className="size-3.5" /> Request again
-          </Button>
-        ) : null}
+
       </div>
     );
   }
@@ -134,8 +125,8 @@ export function ProposalPanel({
           <StatusDot tone={st.tone} />
           {st.label}
         </span>
-        <span className="font-mono text-[11px] text-fg-3">
-          v{proposal.version} · {proposal.provider}/{proposal.model}
+        <span className="text-[11px] text-fg-3" title={routeId(proposal.provider, proposal.model)}>
+          v{proposal.version} · {routeLabel(proposal.provider, proposal.model)}
         </span>
         <span className="ml-auto flex items-baseline gap-3">
           <span data-testid="proposal-price" className="font-mono text-[15px] font-semibold tabular text-fg">
@@ -313,8 +304,10 @@ export function ProposalPanel({
               </ul>
             </div>
           </div>
-          <Callout tone={autoSubmit ? "info" : "neutral"} icon={autoSubmit ? <Send /> : <ShieldCheck />} title={autoSubmit ? "Submission: automatic" : "Submission: manual"} className="mt-4">
-            {autoSubmit
+          <Callout tone={autoSubmit ? "info" : "neutral"} icon={autoSubmit ? <Send /> : <ShieldCheck />} title={sourceName.startsWith("Demo") ? "Demo marketplace submission" : autoSubmit ? "Submission: automatic" : "Submission: manual"} className="mt-4">
+            {sourceName.startsWith("Demo")
+              ? "This is a demo brief: GigPilot simulates the submission and the client’s reply after approval. Nothing is sent anywhere."
+              : autoSubmit
               ? `${sourceName} officially permits programmatic submission, and your autonomy settings allow it. GigPilot submits right after approval (idempotent — never twice).`
               : `${sourceName} doesn’t permit automated proposals${compliance ? ` (${compliance})` : ""}. GigPilot prepares the text; you paste it on ${sourceName} and mark it submitted in Applications.`}
           </Callout>

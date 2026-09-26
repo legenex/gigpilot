@@ -1,4 +1,5 @@
-import type { ProviderHealth, RawOpportunity, SourceAdapter, SourceCapabilities } from "@gigpilot/contracts";
+import type { FetchOpportunitiesOptions, MarketWeight, ProviderHealth, RawOpportunity, SourceAdapter, SourceCapabilities } from "@gigpilot/contracts";
+import { OPERATIONAL_DEFAULTS } from "@gigpilot/config";
 import { and, eq, getDb, sourceIntegration } from "@gigpilot/db";
 import { ProviderError } from "../lib/errors";
 import { safeFetch, type FetchLike, type LookupFn } from "../lib/http";
@@ -46,6 +47,9 @@ export interface WebFeedConfig {
 export type WebConfigLoader = (tenantId: string) => Promise<WebFeedConfig>;
 
 const USER_AGENT = "GigPilot/0.1 (+https://gigpilot.ai; official feed ingestion)";
+
+/** Health reachability results are cached at least this long (OPERATIONAL_DEFAULTS.webFeedHealthCacheMinutes). */
+const HEALTH_CACHE_MINUTES = OPERATIONAL_DEFAULTS.webFeedHealthCacheMinutes;
 
 interface FeedDef {
   name: string;
@@ -241,6 +245,45 @@ export function mapCustomItem(item: FeedItem, feedUrl: string): FeedOpportunity 
 }
 
 // ---------------------------------------------------------------------------
+// Market Lab allocation (weights) → per-market share of the refresh limit
+// ---------------------------------------------------------------------------
+
+function matchesAny(item: RawOpportunity, phrases: string[]): boolean {
+  if (!phrases.length) return false;
+  const hay = ` ${`${item.title}\n${item.description}\n${(item.skills ?? []).join(" ")}`.toLowerCase()} `;
+  return phrases.some((p) => hay.includes(p));
+}
+
+/**
+ * Split the per-refresh `limit` across markets by weight: each market with keywords gets
+ * round(limit × weight share) of the newest items matching its keywords (an item is counted
+ * once). Unweighted calls (or weights without keywords) keep the plain newest-first cut.
+ */
+export function splitByMarketWeights(items: RawOpportunity[], weights: MarketWeight[] | undefined, limit: number): RawOpportunity[] {
+  const markets = (weights ?? [])
+    .map((m) => ({ ...m, phrases: (m.keywords ?? []).map((k) => k.trim().toLowerCase()).filter(Boolean) }))
+    .filter((m) => Number.isFinite(m.weight) && m.weight > 0 && m.phrases.length > 0);
+  if (markets.length === 0) return items.slice(0, limit);
+  const total = markets.reduce((a, m) => a + m.weight, 0);
+  const taken = new Set<string>();
+  const out: RawOpportunity[] = [];
+  const ordered = [...markets].sort((a, b) => b.weight - a.weight);
+  for (const m of ordered) {
+    const quota = Math.round((limit * m.weight) / total);
+    let n = 0;
+    for (const item of items) {
+      if (n >= quota || out.length >= limit) break;
+      if (taken.has(item.externalId) || !matchesAny(item, m.phrases)) continue;
+      taken.add(item.externalId);
+      out.push({ ...item, raw: { ...(item.raw ?? {}), sourcedForMarket: m.key } });
+      n++;
+    }
+  }
+  out.sort((a, b) => (Date.parse(b.postedAt ?? "") || 0) - (Date.parse(a.postedAt ?? "") || 0));
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Process-wide feed cache (enforces minimum intervals)
 // ---------------------------------------------------------------------------
 
@@ -252,9 +295,20 @@ interface FeedState {
 }
 const feedState = new Map<string, FeedState>();
 
+/** Process-wide reachability check used by health() (at most one request per cache window). */
+interface HealthCheckState {
+  checkedAt: number;
+  ok: boolean;
+  feed: FeedKey;
+  status?: number;
+  error?: string;
+}
+let healthCheck: HealthCheckState | undefined;
+
 /** Test helper. */
 export function resetWebFeedCache(): void {
   feedState.clear();
+  healthCheck = undefined;
 }
 
 async function defaultConfigLoader(tenantId: string): Promise<WebFeedConfig> {
@@ -363,7 +417,7 @@ export class WebFeedSource implements SourceAdapter {
     }
   }
 
-  async fetchOpportunities(opts: { tenantId: string; query?: string; limit?: number; since?: Date }): Promise<RawOpportunity[]> {
+  async fetchOpportunities(opts: FetchOpportunitiesOptions): Promise<RawOpportunity[]> {
     let config: WebFeedConfig = {};
     try {
       config = await (this.opts.configLoader ?? defaultConfigLoader)(opts.tenantId);
@@ -414,12 +468,21 @@ export class WebFeedSource implements SourceAdapter {
       }
     }
     out.sort((a, b) => (Date.parse(b.postedAt ?? "") || 0) - (Date.parse(a.postedAt ?? "") || 0));
-    return out.slice(0, Math.min(Math.max(opts.limit ?? 50, 1), 200));
+    const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
+    return splitByMarketWeights(out, opts.weights, limit);
   }
 
-  async health(): Promise<ProviderHealth> {
-    // Zero network calls: feeds have strict request budgets (Remotive ≤ 4/day).
-    const checkedAt = new Date().toISOString();
+  /**
+   * Health is based on a REAL signal: a successful feed fetch within the health cache window,
+   * else ONE cheap reachability check (HEAD of a single feed, never a content fetch) that is
+   * cached process-wide for ≥ OPERATIONAL_DEFAULTS.webFeedHealthCacheMinutes (60 min) — so the
+   * feeds' request budgets (Remotive ≤ 4/day) are never touched by health checks. Without any
+   * signal it reports `degraded` ("not checked yet") rather than a hopeful `connected`.
+   */
+  async health(opts: { check?: boolean } = {}): Promise<ProviderHealth> {
+    const now = this.now();
+    const checkedAt = new Date(now).toISOString();
+    const cacheMs = HEALTH_CACHE_MINUTES * 60_000;
     const feeds = FEED_KEYS.map((k) => {
       const s = feedState.get(k);
       return {
@@ -431,8 +494,38 @@ export class WebFeedSource implements SourceAdapter {
         lastError: s?.lastError ?? null,
       };
     });
+    const recentOk = FEED_KEYS.filter((k) => {
+      const s = feedState.get(k);
+      return s?.fetchedAt !== undefined && now - s.fetchedAt < cacheMs && !(s.lastErrorAt !== undefined && s.lastErrorAt > s.fetchedAt);
+    });
+    if (recentOk.length > 0) {
+      return { status: "connected", detail: `Official public feeds reachable (${recentOk.map((k) => FEEDS[k].name).join(", ")} fetched within the last ${HEALTH_CACHE_MINUTES} min).`, checkedAt, meta: { feeds, basis: "recent_fetch" } };
+    }
     const failing = feeds.filter((f) => f.lastError && !f.lastFetchedAt);
     if (failing.length === feeds.length) return { status: "degraded", detail: "All public feeds failed on their last fetch.", checkedAt, meta: { feeds } };
-    return { status: "connected", detail: "Official public feeds (no credentials needed); fetched at most once per stated interval.", checkedAt, meta: { feeds } };
+    if (!healthCheck || now - healthCheck.checkedAt >= cacheMs) {
+      if (opts.check === false) {
+        return { status: "degraded", detail: "Public feeds not checked yet — reachability is verified at most once an hour.", checkedAt, meta: { feeds, basis: "not_checked" } };
+      }
+      healthCheck = await this.reachability(now);
+    }
+    const h = healthCheck;
+    const at = new Date(h.checkedAt).toISOString();
+    if (h.ok) {
+      return { status: "connected", detail: `${FEEDS[h.feed].name} feed reachable (HTTP ${h.status ?? 200}, checked ${at}); feeds are fetched at most once per stated interval.`, checkedAt, meta: { feeds, basis: "reachability_check", reachability: { ...h, checkedAt: at } } };
+    }
+    return { status: "degraded", detail: `${FEEDS[h.feed].name} feed not reachable (${h.error ?? `HTTP ${h.status}`}, checked ${at}).`, checkedAt, meta: { feeds, basis: "reachability_check", reachability: { ...h, checkedAt: at } } };
+  }
+
+  /** One HEAD request against a single allow-listed feed (We Work Remotely RSS: cheapest, ≥ 60 min interval). */
+  private async reachability(now: number): Promise<HealthCheckState> {
+    const feed: FeedKey = "wwr";
+    const def = FEEDS[feed];
+    try {
+      const res = await safeFetch(def.url, { method: "HEAD", headers: { "user-agent": USER_AGENT } }, { allowHosts: def.host, fetch: this.opts.fetch, timeoutMs: 10_000, retries: 0, maxBytes: 64 * 1024 });
+      return { checkedAt: now, ok: res.ok, feed, status: res.status };
+    } catch (err) {
+      return { checkedAt: now, ok: false, feed, error: err instanceof Error ? err.message.slice(0, 160) : "request failed" };
+    }
   }
 }

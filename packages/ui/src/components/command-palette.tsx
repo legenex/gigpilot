@@ -2,7 +2,7 @@
 
 import { Command } from "cmdk";
 import { Dialog as RDialog } from "radix-ui";
-import type { ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { cn } from "../lib/cn";
 
 export interface CommandItemDef {
@@ -43,6 +43,20 @@ export function CommandPalette({
   placeholder?: string;
   footer?: ReactNode;
 }) {
+  // Keep the highlight on the first visible result whenever the query or the
+  // (possibly async) result set changes, so ↵ always opens the top match.
+  const listRef = useRef<HTMLDivElement>(null);
+  const [selected, setSelected] = useState("");
+  const signature = groups.map((g) => `${g.heading}:${g.items.map((i) => i.id).join(",")}`).join("|");
+  useEffect(() => {
+    if (!open) return;
+    const id = window.requestAnimationFrame(() => {
+      const first = listRef.current?.querySelector<HTMLElement>("[cmdk-item]:not([aria-disabled='true'])");
+      const v = first?.getAttribute("data-value");
+      if (v) setSelected(v);
+    });
+    return () => window.cancelAnimationFrame(id);
+  }, [query, signature, open]);
   return (
     <RDialog.Root open={open} onOpenChange={onOpenChange}>
       <RDialog.Portal>
@@ -52,7 +66,7 @@ export function CommandPalette({
           aria-describedby={undefined}
         >
           <RDialog.Title className="sr-only">Command palette</RDialog.Title>
-          <Command label="Command palette" loop className="flex flex-col" shouldFilter>
+          <Command label="Command palette" loop className="flex flex-col" shouldFilter value={selected} onValueChange={setSelected}>
             <div className="hairline-b flex items-center gap-2.5 px-4">
               <svg viewBox="0 0 16 16" className="size-4 shrink-0 text-fg-3" aria-hidden>
                 <circle cx="7" cy="7" r="4.75" fill="none" stroke="currentColor" strokeWidth="1.5" />
@@ -66,7 +80,7 @@ export function CommandPalette({
               />
               {loading ? <span className="size-3.5 animate-spin rounded-full border-[1.5px] border-fg-3 border-t-transparent" aria-label="Searching" /> : null}
             </div>
-            <Command.List className="max-h-[min(420px,60vh)] overflow-y-auto overscroll-contain p-1.5 [&_[cmdk-group-heading]]:px-2.5 [&_[cmdk-group-heading]]:pb-1.5 [&_[cmdk-group-heading]]:pt-2.5 [&_[cmdk-group-heading]]:font-mono [&_[cmdk-group-heading]]:text-[10.5px] [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-[0.06em] [&_[cmdk-group-heading]]:text-fg-3">
+            <Command.List ref={listRef} className="max-h-[min(420px,60vh)] overflow-y-auto overscroll-contain p-1.5 [&_[cmdk-group-heading]]:px-2.5 [&_[cmdk-group-heading]]:pb-1.5 [&_[cmdk-group-heading]]:pt-2.5 [&_[cmdk-group-heading]]:font-mono [&_[cmdk-group-heading]]:text-[11px] [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-[0.06em] [&_[cmdk-group-heading]]:text-fg-3">
               <Command.Empty className="px-3 py-8 text-center text-[13px] text-fg-3">{loading ? "Searching…" : "No matches."}</Command.Empty>
               {groups
                 .filter((g) => g.items.length)

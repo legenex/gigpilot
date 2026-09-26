@@ -45,11 +45,27 @@ export const tenantSettingsSchema = z.object({
   autonomy: z
     .object({
       requireOpportunityApproval: z.boolean().default(D.autonomy.requireOpportunityApproval),
-      requireProposalApproval: z.boolean().default(D.autonomy.requireProposalApproval),
+      /**
+       * IGNORED — proposal, price and scope approval is a commercial-commitment gate that is
+       * always required (AGENTS.md human-only gates). Stored values are coerced to true.
+       */
+      requireProposalApproval: z
+        .boolean()
+        .default(D.autonomy.requireProposalApproval)
+        .transform((): true => true)
+        .describe("Ignored: proposal/price/scope approval is a commercial gate and is always required (value is always true)."),
       autoSubmitWhenPermitted: z.boolean().default(D.autonomy.autoSubmitWhenPermitted),
       requireFinalDeliveryApproval: z.boolean().default(D.autonomy.requireFinalDeliveryApproval),
       autoRepairWithinLimits: z.boolean().default(D.autonomy.autoRepairWithinLimits),
-      autoSendClientMessages: z.boolean().default(D.autonomy.autoSendClientMessages),
+      /**
+       * Not implemented — GigPilot has no external client-messaging channel; client messages are
+       * always drafted for the owner. Stored values are coerced to false.
+       */
+      autoSendClientMessages: z
+        .boolean()
+        .default(D.autonomy.autoSendClientMessages)
+        .transform((): false => false)
+        .describe("Not available: GigPilot never sends client messages itself (no external send path exists); always false."),
     })
     .prefault({}),
   limits: z
@@ -75,6 +91,17 @@ export const tenantSettingsSchema = z.object({
     .object({
       refreshIntervalMinutes: z.number().int().min(5).max(1440).default(D.sourcing.refreshIntervalMinutes),
       opportunityMaxAgeHours: z.number().int().min(1).max(24 * 30).default(D.sourcing.opportunityMaxAgeHours),
+      /** Submitted / client_response applications with no update for this many days are marked expired. */
+      applicationExpiryDays: z.number().int().min(1).max(365).default(D.sourcing.applicationExpiryDays),
+    })
+    .prefault({}),
+  demo: z
+    .object({
+      /**
+       * Demo workspaces only: inject one scripted, clearly labelled defect on the first attempt of
+       * a production step so the QA → repair loop is visible. Never applies to live workspaces.
+       */
+      injectDefect: z.boolean().default(D.demo.injectDefect).describe("Demo workspaces only: inject one labelled simulated defect to demonstrate QA → repair."),
     })
     .prefault({}),
 });

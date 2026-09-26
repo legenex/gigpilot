@@ -42,6 +42,29 @@ export interface RepairDirective {
   generationIds?: string[];
   exclude?: { provider: string; model: string }[];
   avoidFamilies?: string[];
+  /** Duplicate units: render a different concept variant (shift applied to the unit's variant index). */
+  variantShift?: number;
+  /** The QA failure being repaired was a simulated defect injected for the demo. */
+  demoDefect?: boolean;
+}
+
+/** Unit concept + copy variant for a GLOBAL unit index (unique across all batches of a job). */
+export function unitCreative(concepts: Concept[], globalIndex: number): { concept: Concept; headline: string; subhead: string; scene: string; variant: number } {
+  const list = concepts.length ? concepts : [{ angle: "Hero", headline: "Hero", subhead: "", cta: "Learn more", scene: "Product hero", script: [] }];
+  const n = list.length;
+  const c = list[((globalIndex % n) + n) % n]!;
+  const v = Math.floor(globalIndex / n);
+  if (v <= 0) return { concept: c, headline: c.headline, subhead: c.subhead, scene: c.scene, variant: 0 };
+  // Later units re-use the angle with a different hook line and scene (never an identical render).
+  const beats = c.script.map((b) => b.trim()).filter((b) => b.length >= 3);
+  const alt = beats.length ? beats[(v - 1) % beats.length]! : null;
+  return {
+    concept: c,
+    headline: alt ? alt.replace(/[.…!]+$/, "") : `${c.headline} (${c.angle} take ${v + 1})`,
+    subhead: v % 2 === 1 ? c.subhead : `${c.angle}: ${c.subhead}`,
+    scene: `${c.scene}, alternate take ${["two", "three", "four", "five", "six", "seven", "eight"][(v - 1) % 7]}`,
+    variant: v,
+  };
 }
 
 const conceptSchema = z.object({
@@ -168,6 +191,20 @@ function docMessages(c: ContentContext, fallback: string) {
   ];
 }
 
+/** Remove ad-creative concept blocks (Concept sections, Headline/CTA/Scene lines) from non-creative docs. */
+export function stripCreativeConcepts(markdown: string): string {
+  const lines = markdown.split("\n");
+  const out: string[] = [];
+  let skipping = false;
+  for (const l of lines) {
+    if (/^#{1,3}\s/.test(l)) skipping = /^#{1,3}\s*(concepts?\b|concept \d|hooks? & scripts|hook bank)/i.test(l.trim());
+    if (skipping) continue;
+    if (/^\s*[-*]?\s*\*{0,2}(headline|subhead|cta|scene|script beats)\*{0,2}\s*:/i.test(l)) continue;
+    out.push(l);
+  }
+  return out.join("\n");
+}
+
 function stripSection(markdown: string, heading: string): string {
   const lines = markdown.split("\n");
   const out: string[] = [];
@@ -193,6 +230,15 @@ async function executeDocument(ctx: RunContext, j: JobRow, step: StepRow, all: S
   });
   let markdown = res.data?.markdown ?? generated.markdown;
   if (c.defect === "missing_section") markdown = stripSection(markdown, "## Sources");
+  // Per-family templates only: ad-creative concept blocks never leak into non-creative deliverables.
+  if (j.serviceFamily !== "paid-social-ugc" && j.serviceFamily !== "image-design") markdown = stripCreativeConcepts(markdown);
+  const noWeb = res.webResearch?.requested === true && !res.webResearch.performed;
+  if (noWeb && !/no live web research/i.test(markdown)) {
+    const lines = markdown.split("\n");
+    const at = lines[0]?.startsWith("# ") ? 1 : 0;
+    lines.splice(at, 0, "", `> ${res.webResearch?.note ?? "No live web research (model knowledge only)"} — findings are not backed by current web sources.`);
+    markdown = lines.join("\n");
+  }
   const concepts: Concept[] | undefined =
     step.kind === "concepts" && (j.serviceFamily === "paid-social-ugc" || j.serviceFamily === "image-design")
       ? res.data?.concepts?.length
@@ -212,8 +258,15 @@ async function executeDocument(ctx: RunContext, j: JobRow, step: StepRow, all: S
   });
   const firstLine = markdown.split("\n").find((l) => l.startsWith("- ") || (l.length > 40 && !l.startsWith("#") && !l.startsWith(">")));
   return {
-    output: { markdown: markdown.slice(0, 20_000), concepts, assets: [{ assetId: file.id, filename: file.filename, kind: file.kind }], provider: res.family, model: res.model },
-    summary: `${step.name} drafted (${res.family === "mock" ? "deterministic mock" : `${res.family}/${res.model}`})${firstLine ? ` — ${truncate(firstLine.replace(/^- /, ""), 90)}` : ""}`,
+    output: {
+      markdown: markdown.slice(0, 20_000),
+      concepts,
+      assets: [{ assetId: file.id, filename: file.filename, kind: file.kind }],
+      provider: res.family,
+      model: res.model,
+      ...(res.webResearch ? { webResearch: res.webResearch.performed ? "live" : "none" } : {}),
+    },
+    summary: `${step.name} drafted (${res.family === "mock" ? "deterministic mock" : `${res.family}/${res.model}`}${noWeb ? ", no live web research" : ""})${firstLine ? ` — ${truncate(firstLine.replace(/^- /, ""), 90)}` : ""}`,
   };
 }
 
@@ -225,6 +278,8 @@ function conceptsFor(all: StepRow[], j: JobRow, clientName: string | null): Conc
 
 interface GenItem {
   unitIndex: number;
+  /** Unit index across all batches of the job (planner offset + unitIndex). */
+  globalIndex?: number;
   generationId: string;
   assetIds: string[];
   filenames: string[];
@@ -250,17 +305,22 @@ async function executeGenerate(ctx: RunContext, j: JobRow, step: StepRow, all: S
   // Unit keys are scoped to the repair/revision that asked for them, never to the attempt:
   // units that already succeeded are reused on a retry instead of regenerated (and re-paid).
   const scope = repair?.repairId ?? (typeof input.revisionRepairId === "string" ? `rev-${input.revisionRepairId}` : "base");
+  // Global unit offset (planner): batch B continues after batch A, so no two units share a concept variant.
+  const unitOffset = Math.max(0, Number(input.unitOffset ?? 0) || 0);
+  const shift = repair?.variantShift ?? 0;
   let spent = 0;
   let mode = "live";
   for (const i of toRender) {
     await ctx.checkpoint();
-    const c = concepts[i % concepts.length]!;
+    const globalIndex = unitOffset + i;
+    const u = unitCreative(concepts, globalIndex + (repair?.unitIndexes?.includes(i) ? shift * 7 : 0));
+    const c = u.concept;
     const prompt = [
-      `Headline: ${c.headline}`,
-      `Subhead: ${c.subhead}`,
+      `Headline: ${u.headline}`,
+      `Subhead: ${u.subhead}`,
       `CTA: ${c.cta}`,
       `Brand: ${clientName ?? productPhrase(j.title)}`,
-      `Scene: ${c.scene}`,
+      `Scene: ${u.scene}`,
       `Script: ${c.script.join(" | ")}`,
       `Format: ${aspectRatio ?? "as briefed"}${durationSec && capability.startsWith("video.") ? `, ${durationSec}s` : ""}`,
       "Style: premium, high-contrast, mobile-first; keep logo and text inside the safe zone.",
@@ -277,9 +337,9 @@ async function executeGenerate(ctx: RunContext, j: JobRow, step: StepRow, all: S
       prompt,
       aspectRatio,
       durationSec: capability.startsWith("video.") ? durationSec : undefined,
-      params: { unitIndex: i, variant: i, concept: c.angle },
+      params: { unitIndex: i, globalIndex, variant: globalIndex, conceptVariant: u.variant, concept: c.angle },
       idempotencyKey: `gen:${step.id}:${scope}:${i}`,
-      label: `${step.name.replace(/ — batch [AB]$/, "")} #${i + 1}${useEdit ? " (edit)" : ""}`,
+      label: `${step.name.replace(/ — batch [A-Z]$/, "")} #${globalIndex + 1}${useEdit ? " (edit)" : ""}`,
       simulateDefect: defect && i === toRender[0] ? defect : null,
       exclude: repair?.exclude,
       repairOfId: repair ? (prev?.generationId ?? null) : null,
@@ -295,6 +355,7 @@ async function executeGenerate(ctx: RunContext, j: JobRow, step: StepRow, all: S
       model: res.model,
       concept: c.angle,
       mode: res.mode,
+      globalIndex,
     });
   }
   const sorted = [...items.values()].sort((a, b) => a.unitIndex - b.unitIndex);
@@ -306,6 +367,8 @@ async function executeGenerate(ctx: RunContext, j: JobRow, step: StepRow, all: S
       aspectRatio: aspectRatio ?? null,
       durationSec: durationSec ?? null,
       units,
+      deliverableUnits: Number(input.deliverableUnits ?? units),
+      unitOffset,
       assets: sorted.flatMap((s) => s.assetIds.map((id, k) => ({ assetId: id, filename: s.filenames[k], kind: "image" }))),
     },
     summary: `${repair ? `Re-rendered ${toRender.length} of ${units}` : `Rendered ${units}`} ${aspectRatio ?? ""} ${noun}${mode === "mock" ? " in mock mode" : ""} · ${money(spent)}${mode === "mock" ? " simulated" : ""}`.replace(/\s+/g, " "),
@@ -385,10 +448,12 @@ async function executeCode(ctx: RunContext, j: JobRow, step: StepRow, _all: Step
   if (defect === "failing_test" && art.testReport.failed === 0 && art.testReport.tests.length > 0) {
     const t = art.testReport.tests[art.testReport.tests.length - 1]!;
     t.status = "failed";
-    t.error = "assertion failed (demo defect injected on first attempt)";
+    t.error = "assertion failed (simulated defect injected for the demo — demo workspaces only)";
     art.testReport.failed = 1;
     art.testReport.passed = Math.max(0, art.testReport.passed - 1);
   }
+  // No sandbox test runner exists: whatever the generator claims, these tests were NOT executed here.
+  art.testReport = { ...art.testReport, simulated: true };
   const db = getDb();
   const archive = zipArtifact(art);
   const zip = await storeFile(ctx.deps, db, {
@@ -411,33 +476,46 @@ async function executeCode(ctx: RunContext, j: JobRow, step: StepRow, _all: Step
   });
   return {
     output: {
-      summary: art.summary,
+      summary: honestCodeSummary(art.summary),
       files: art.files.map((f) => f.path).filter((p) => !archive.rejected.includes(p)),
+      testsExecuted: false,
       rejectedPaths: archive.rejected,
       testReport: art.testReport,
       assets: [{ assetId: zip.id, filename: zip.filename, kind: "code" }],
       provider: res.family,
       model: res.model,
     },
-    summary: `${truncate(art.summary, 140)} (${res.family === "mock" ? "deterministic mock" : `${res.family}/${res.model}`})${archive.rejected.length ? ` — ${archive.rejected.length} unsafe path(s) rejected` : ""}`,
+    summary: `${truncate(honestCodeSummary(art.summary), 140)} (${res.family === "mock" ? "deterministic mock" : `${res.family}/${res.model}`}; ${art.testReport.tests.length} test${art.testReport.tests.length === 1 ? "" : "s"} written, not executed)${archive.rejected.length ? ` — ${archive.rejected.length} unsafe path(s) rejected` : ""}`,
   };
 }
 
-/** True when a test report carries no evidence that the tests were actually executed. */
-export function testsUnverified(report: CodeArtifact["testReport"] | null | undefined): boolean {
-  return !report || report.simulated === true || !Array.isArray(report.tests) || report.tests.length === 0;
+/**
+ * True when a test report carries no evidence that the tests were actually executed.
+ * GigPilot has NO sandbox test runner, so every report is unverified: a model's own
+ * `simulated: false` claim is never evidence.
+ */
+export function testsUnverified(_report: CodeArtifact["testReport"] | null | undefined): boolean {
+  return true;
+}
+
+/** Strip self-reported "N/M tests passing" claims from a model/generator summary. */
+export function honestCodeSummary(summary: string): string {
+  return summary
+    .replace(/,?\s*\d+\s*\/\s*\d+\s+(tests?|checks?)\s+(passing|passed|green)/gi, "")
+    .replace(/,?\s*(all\s+)?\d*\s*(tests?|checks?)\s+(are\s+)?(passing|passed|green)\b/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
 }
 
 async function executeTest(ctx: RunContext, j: JobRow, step: StepRow, all: StepRow[], attempt: number): Promise<StepOutcome> {
   const impl = [...all].reverse().find((s) => s.kind === "code" && upstreamKeys(step, all).has(s.key));
   const report = outputOf(impl).testReport as CodeArtifact["testReport"] | undefined;
   const failed = report?.failed ?? 0;
-  const unverified = testsUnverified(report);
+  // There is no sandbox test runner: tests are never executed here, whatever the report claims.
   const result = !report
     ? "No test report found on the implementation step."
-    : unverified
-      ? `UNVERIFIED — tests generated but not executed in this environment (${report.tests.length} test${report.tests.length === 1 ? "" : "s"} written, self-reported ${report.failed === 0 ? "pass" : `${report.failed} failing`}; run \`npm test\` to verify)`
-      : `${report.failed === 0 ? "PASS" : "FAIL"} — ${report.passed} passed, ${report.failed} failed (${report.runner})`;
+    : `NOT EXECUTED — ${report.tests.length} test${report.tests.length === 1 ? "" : "s"} generated but not executed in this environment (no test runner). ` +
+      `The generator self-reports ${report.failed === 0 ? "no failures" : `${report.failed} failing`} — unverified. Run \`npm test\` in the project to verify.`;
   // Deterministic report: no model call (the numbers must never be paraphrased or paid for).
   const markdown = [
     `# ${step.name} — ${j.title}`,
@@ -445,10 +523,10 @@ async function executeTest(ctx: RunContext, j: JobRow, step: StepRow, all: StepR
     "## Result",
     result,
     "",
-    "## Tests",
-    ...(report?.tests ?? []).map((t) => `- [${unverified ? "?" : t.status === "passed" ? "x" : " "}] ${t.name}${t.error ? ` — ${t.error}` : ""}`),
+    "## Tests written (self-reported status, not executed)",
+    ...(report?.tests ?? []).map((t) => `- [?] ${t.name}${t.status === "failed" ? ` — self-reported failure${t.error ? `: ${t.error}` : ""}` : ""}`),
     "",
-    "## Coverage of acceptance criteria",
+    "## Acceptance criteria (not verified by test execution)",
     ...step.acceptance.map((a) => `- ${a}`),
   ].join("\n");
   const db = getDb();
@@ -460,17 +538,13 @@ async function executeTest(ctx: RunContext, j: JobRow, step: StepRow, all: StepR
     mime: "text/markdown",
     bytes: strToU8(markdown),
     kind: "document",
-    meta: { stepKey: step.key, attempt, testsExecuted: !unverified },
+    meta: { stepKey: step.key, attempt, testsExecuted: false },
   });
   ctx.provider = "deterministic";
   ctx.model = "test-report";
   return {
-    output: { markdown, testReport: report ?? null, testsExecuted: !unverified, assets: [{ assetId: file.id, filename: file.filename, kind: "document" }] },
-    summary: !report
-      ? "No tests found"
-      : unverified
-        ? `Tests generated but not executed in this environment (${report.tests.length} written${failed ? `, ${failed} self-reported failing` : ""})`
-        : `Test run: ${report.passed}/${report.tests.length} passing${failed ? ` — ${failed} failing` : ""}`,
+    output: { markdown, testReport: report ?? null, testsExecuted: false, assets: [{ assetId: file.id, filename: file.filename, kind: "document" }] },
+    summary: !report ? "No tests found" : `Tests generated but not executed in this environment (${report.tests.length} written${failed ? `, ${failed} self-reported failing` : ""})`,
   };
 }
 

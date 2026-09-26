@@ -28,10 +28,11 @@ import {
   type Executor,
 } from "@gigpilot/db";
 import { wrapUntrusted } from "@gigpilot/providers";
-import { estimateOpportunity, scoreOpportunity, statedBudget, type EconomicsResult } from "@gigpilot/economics";
+import { estimateOpportunity, scoreOpportunity, statedBudget, type EconomicsResult, type ScoreResult } from "@gigpilot/economics";
 import type { AgentDeps } from "../deps";
 import { analyseOpportunityHeuristically, sanitiseAnalysis } from "../heuristics/analysis";
 import { notify } from "../lib/notify";
+import { routeAvailability, type RouteAvailability } from "../lib/routes";
 import { familyLabel, money, pct, quote, safeError } from "../lib/util";
 import { callIntelligence, runAgent } from "../runtime";
 
@@ -138,7 +139,8 @@ export async function refineDecision(
         eq(agentEvent.type, "opportunity.analysed"),
         gte(agentEvent.createdAt, since),
         sql`${agentEvent.data} ->> 'triaged' = 'true'`,
-        sql`${agentEvent.data} ->> 'recommendation' = 'pursue'`,
+        // Triage never recommends pursuit itself; it flags pursue candidates for refinement.
+        sql`(${agentEvent.data} ->> 'pursueCandidate' = 'true' or ${agentEvent.data} ->> 'recommendation' = 'pursue')`,
       ),
     )
     .limit(2000)) as { subjectId: string | null; data: Record<string, unknown> | null }[];
@@ -169,6 +171,10 @@ export async function persistEstimate(
       attempts: li.attempts,
       totalUsd: li.totalUsd,
       priceSource: li.priceSource,
+      ...(li.routeStatus ? { routeStatus: li.routeStatus } : {}),
+      ...(li.requestedProvider !== undefined ? { requestedProvider: li.requestedProvider } : {}),
+      ...(li.routeNote ? { routeNote: li.routeNote } : {}),
+      ...(li.capability ? { capability: li.capability } : {}),
     })),
     fulfilmentCostUsd: e.fulfilmentCostUsd,
     revisionContingencyUsd: e.revisionContingencyUsd,
@@ -182,6 +188,7 @@ export async function persistEstimate(
     breakEvenPriceUsd: e.breakEvenPriceUsd,
     complete: e.complete,
     missing: e.missing,
+    ...(e.coverage ? { coverage: e.coverage } : {}),
   };
   const [row] = await db
     .insert(costEstimate)
@@ -208,18 +215,39 @@ export async function tenantMetrics(db: Executor, tenantId: string) {
     .where(eq(providerMetric.tenantId, tenantId));
 }
 
+/**
+ * Deterministic economics + score. When `routes` (what can actually run for the tenant) is
+ * given, inference is priced on the family the router would really use, creative on the
+ * providers that are really available (else "simulated"), and — in live workspaces — a
+ * production capability with no connected provider makes the estimate incomplete.
+ * `expectedRevisionRounds` overrides the tenant default (a proposal that promises more
+ * rounds must price them).
+ */
 export function computeEconomics(
   analysis: OpportunityAnalysis,
   opp: Pick<OpportunityRow, "sourceKey" | "budgetType" | "budgetMinUsd" | "budgetMaxUsd">,
   settings: TenantSettings,
   metrics: Awaited<ReturnType<typeof tenantMetrics>>,
   proposedPriceUsd?: number | null,
+  routes?: RouteAvailability | null,
+  overrides: { expectedRevisionRounds?: number } = {},
 ) {
-  const { economics, routes } = estimateOpportunity(
+  const effective: TenantSettings =
+    overrides.expectedRevisionRounds !== undefined && overrides.expectedRevisionRounds > settings.economics.expectedRevisionRounds
+      ? { ...settings, economics: { ...settings.economics, expectedRevisionRounds: overrides.expectedRevisionRounds } }
+      : settings;
+  const { economics, routes: creativeRoutes } = estimateOpportunity(
     analysis,
     { sourceKey: opp.sourceKey, budgetType: opp.budgetType, budgetMinUsd: opp.budgetMinUsd, budgetMaxUsd: opp.budgetMaxUsd, proposedPriceUsd: proposedPriceUsd ?? null },
-    settings,
-    { metrics },
+    effective,
+    routes
+      ? {
+          metrics,
+          availableIntelligenceFamilies: routes.intelligenceFamilies,
+          availableCreativeProviders: routes.creativeProviders,
+          requireConnectedProviders: routes.live,
+        }
+      : { metrics },
   );
   const score = scoreOpportunity(
     economics,
@@ -235,7 +263,21 @@ export function computeEconomics(
     // For hourly work the stated "budget" is a rate, not a total — let the gate use the estimated price instead.
     opp.budgetType === "hourly" ? null : statedBudget(opp.budgetMinUsd, opp.budgetMaxUsd),
   );
-  return { economics, routes, score };
+  return { economics, routes: creativeRoutes, score };
+}
+
+/** Reason recorded on every triage-only analysis that would otherwise have been recommended for pursuit. */
+export const PRELIMINARY_TRIAGE_REASON = "Preliminary triage — awaiting deep analysis";
+
+/**
+ * Two-tier rule (C2): a keyword triage can never recommend pursuit. A triage "pursue" is
+ * stored as `consider` with the preliminary reason and flagged as a pursue candidate for
+ * the refinement queue; only a model refinement (or an owner-forced deep analysis) may
+ * promote it to `pursue` + shortlist.
+ */
+export function triageRecommendation(score: ScoreResult, modelBacked: boolean): { recommendation: ScoreResult["recommendation"]; reasons: string[]; pursueCandidate: boolean } {
+  if (modelBacked || score.recommendation !== "pursue") return { recommendation: score.recommendation, reasons: score.reasons, pursueCandidate: false };
+  return { recommendation: "consider", reasons: [PRELIMINARY_TRIAGE_REASON, ...score.reasons], pursueCandidate: true };
 }
 
 /**
@@ -265,14 +307,17 @@ export async function runOpportunityAnalyse(payload: QueuePayloads["opportunity-
       async (ctx) => {
         const { markets, baseline } = await baselineFor(opp, settings, deps);
         // Two-tier analysis: every brief gets an instant deterministic triage priced by the
-        // same economics engine, so the radar fills immediately. Pursue candidates are then
-        // refined by local GX in a separate job (runOpportunityRefine) without blocking the
-        // owner; an owner-requested re-analysis goes straight to the model.
+        // same economics engine, so the radar fills immediately. A triage can never recommend
+        // pursuit: candidates are refined by the model router in a separate job
+        // (runOpportunityRefine) without blocking the owner; an owner-requested re-analysis
+        // goes straight to the model.
         const metrics = await tenantMetrics(db, tenantId);
+        const routes = await routeAvailability(deps, tenantId, settings);
         const deep = Boolean(payload.force);
         let provider = "heuristic";
         let model = "deterministic-triage";
         let analysis = baseline;
+        let modelBacked = false;
         if (deep) {
           const res = await callIntelligence(
             ctx,
@@ -290,6 +335,8 @@ export async function runOpportunityAnalyse(payload: QueuePayloads["opportunity-
           provider = res.family;
           model = res.model;
           analysis = res.family === "mock" ? baseline : sanitiseAnalysis(res.data ?? baseline, baseline);
+          // The deterministic mock only stands in for a model in demo workspaces.
+          modelBacked = res.family !== "mock" || !routes.live;
         } else {
           ctx.provider = provider;
           ctx.model = model;
@@ -297,11 +344,13 @@ export async function runOpportunityAnalyse(payload: QueuePayloads["opportunity-
 
         const analysisRow = await insertAnalysisVersion(db, { tenantId, opportunityId: opp.id, analysis, provider, model, agentRunId: ctx.runId });
 
-        const { economics, score } = computeEconomics(analysis, opp, settings, metrics);
-        const refine =
-          !deep && score.recommendation === "pursue"
-            ? await refineDecision(db, { tenantId, opportunityId: opp.id, expectedProfitUsd: economics.grossProfitUsd, now: deps.now(), maxPerHour: settings.limits.maxRefinesPerHour })
-            : null;
+        const { economics, score: rawScore } = computeEconomics(analysis, opp, settings, metrics, null, routes);
+        const decision = triageRecommendation(rawScore, modelBacked);
+        const score = { ...rawScore, recommendation: decision.recommendation, reasons: decision.reasons };
+        const refine = decision.pursueCandidate
+          ? await refineDecision(db, { tenantId, opportunityId: opp.id, expectedProfitUsd: economics.grossProfitUsd, now: deps.now(), maxPerHour: settings.limits.maxRefinesPerHour })
+          : null;
+        if (refine && !refine.refine) score.reasons = [`${PRELIMINARY_TRIAGE_REASON} (deep analysis skipped this hour — cap reached; re-analyse to run it now)`, ...rawScore.reasons];
         const estimateId = await persistEstimate(db, { tenantId, opportunityId: opp.id, analysisId: analysisRow.id, economics });
         await db.insert(opportunityScore).values({
           tenantId,
@@ -324,7 +373,7 @@ export async function runOpportunityAnalyse(payload: QueuePayloads["opportunity-
           opp.budgetType === "hourly"
             ? `${money(economics.priceUsd)} est. (${money(opp.budgetMinUsd)}–${money(opp.budgetMaxUsd)}/h)`
             : `${money(opp.budgetMaxUsd ?? opp.budgetMinUsd ?? economics.priceUsd)} budget`;
-        const message = `Analysed ${quote(opp.title)} — ${budgetLabel}, ${money(economics.grossProfitUsd)} expected profit, ${pct(economics.grossMargin)} margin → ${score.recommendation}`;
+        const message = `${deep ? "Analysed" : "Triaged"} ${quote(opp.title)} — ${budgetLabel}, ${money(economics.grossProfitUsd)} expected profit, ${pct(economics.grossMargin)} margin → ${score.recommendation}${decision.pursueCandidate ? (refine?.refine ? " (preliminary — deep analysis queued)" : " (preliminary — awaiting deep analysis)") : ""}`;
 
         await db.transaction(async (tx) => {
           await transition(tx, {
@@ -358,7 +407,11 @@ export async function runOpportunityAnalyse(payload: QueuePayloads["opportunity-
                 family: analysis.serviceFamily,
                 triaged: !deep,
                 recommendation: score.recommendation,
+                triageRecommendation: rawScore.recommendation,
+                pursueCandidate: decision.pursueCandidate,
+                preliminary: !modelBacked,
                 expectedProfitUsd: economics.grossProfitUsd,
+                estimateComplete: economics.complete,
                 ...(refine ? (refine.refine ? { refineQueued: true } : { refineSkipped: refine.reason ?? "hourly cap" }) : {}),
               },
             },
@@ -456,6 +509,9 @@ async function baselineFor(opp: typeof opportunity.$inferSelect, settings: Await
  * GX first). Adds a new analysis version and re-prices it; never flips the
  * opportunity out of its current state (so it cannot race owner actions) —
  * it only shortlists an `analysed` brief that the refined numbers now clear.
+ * This (or an owner-forced deep analysis) is the ONLY path to `pursue`. In
+ * demo workspaces the deterministic mock stands in for the model (labelled);
+ * in live workspaces a mock answer leaves the preliminary triage in place.
  */
 export async function runOpportunityRefine(payload: QueuePayloads["opportunity-refine"], deps: AgentDeps) {
   const db = getDb();
@@ -470,6 +526,7 @@ export async function runOpportunityRefine(payload: QueuePayloads["opportunity-r
     { deps, tenantId, agent: "analyst", task: "analyse_opportunity.refine", subjectType: "opportunity", subjectId: opp.id, label: `Deep analysis of ${quote(opp.title)}` },
     async (ctx) => {
       const { markets, baseline } = await baselineFor(opp, settings, deps);
+      const routes = await routeAvailability(deps, tenantId, settings);
       const res = await callIntelligence(
         ctx,
         {
@@ -483,14 +540,17 @@ export async function runOpportunityRefine(payload: QueuePayloads["opportunity-r
         },
         { opportunityId: opp.id },
       );
-      if (res.family === "mock") {
-        ctx.summary = "No model available — triage analysis stands";
+      if (res.family === "mock" && routes.live) {
+        ctx.summary = "No model available — the preliminary triage stands (not recommended for pursuit)";
         return { status: "unchanged" as const };
       }
-      const analysis = sanitiseAnalysis(res.data ?? baseline, baseline);
-      const analysisRow = await insertAnalysisVersion(db, { tenantId, opportunityId: opp.id, analysis, provider: res.family, model: res.model, agentRunId: ctx.runId });
+      const mockStandIn = res.family === "mock";
+      const analysis = mockStandIn ? baseline : sanitiseAnalysis(res.data ?? baseline, baseline);
+      const provider = mockStandIn ? "mock" : res.family;
+      const model = mockStandIn ? "deterministic-refinement (demo)" : res.model;
+      const analysisRow = await insertAnalysisVersion(db, { tenantId, opportunityId: opp.id, analysis, provider, model, agentRunId: ctx.runId });
       const metrics = await tenantMetrics(db, tenantId);
-      const { economics, score } = computeEconomics(analysis, opp, settings, metrics);
+      const { economics, score } = computeEconomics(analysis, opp, settings, metrics, null, routes);
       const estimateId = await persistEstimate(db, { tenantId, opportunityId: opp.id, analysisId: analysisRow.id, economics });
       await db.insert(opportunityScore).values({
         tenantId,
@@ -508,7 +568,8 @@ export async function runOpportunityRefine(payload: QueuePayloads["opportunity-r
         reasons: score.reasons,
       });
       const marketKeys = new Set(markets.map((m) => m.key));
-      const message = `Refined ${quote(opp.title)} with ${res.family}/${res.model} — ${money(economics.grossProfitUsd)} expected profit, ${pct(economics.grossMargin)} margin → ${score.recommendation}`;
+      const message = `Deep analysis of ${quote(opp.title)} (${mockStandIn ? "deterministic refinement — demo mode" : `${res.family}/${res.model}`}) — ${money(economics.grossProfitUsd)} expected profit, ${pct(economics.grossMargin)} margin → ${score.recommendation}`;
+      let shortlisted = false;
       await db.transaction(async (tx) => {
         // Only still-open briefs are re-priced; an owner action in the meantime wins.
         const updated = await tx
@@ -530,18 +591,47 @@ export async function runOpportunityRefine(payload: QueuePayloads["opportunity-r
         await emitEvent(tx, {
           tenantId,
           type: "opportunity.analysed",
-          level: "info",
+          level: score.recommendation === "pursue" ? "success" : "info",
           agent: "analyst",
           runId: ctx.runId,
           subjectType: "opportunity",
           subjectId: opp.id,
           message,
-          data: { provider: res.family, model: res.model, refined: true },
+          data: { provider, model, refined: true, recommendation: score.recommendation, expectedProfitUsd: economics.grossProfitUsd, estimateComplete: economics.complete, deterministicStandIn: mockStandIn },
         });
         if (updated[0].status === "analysed" && score.recommendation === "pursue") {
-          await transition(tx, { machine: "opportunity", id: opp.id, tenantId, to: "shortlisted", actor, reason: score.reasons[0] });
+          shortlisted = true;
+          await transition(tx, {
+            machine: "opportunity",
+            id: opp.id,
+            tenantId,
+            to: "shortlisted",
+            actor,
+            reason: score.reasons[0],
+            event: {
+              type: "opportunity.shortlisted",
+              level: "success",
+              agent: "analyst",
+              runId: ctx.runId,
+              subjectType: "opportunity",
+              subjectId: opp.id,
+              message: `Shortlisted ${quote(opp.title)} (${familyLabel(analysis.serviceFamily)}) after deep analysis — awaiting your approval to pursue`,
+            },
+          });
+          await notify(tx, {
+            tenantId,
+            kind: "approval",
+            title: `Pursue “${opp.title.slice(0, 90)}”?`,
+            body: `${money(economics.grossProfitUsd)} expected profit at ${pct(economics.grossMargin)} margin (deep analysis). ${score.reasons[0] ?? ""}`.trim(),
+            link: `/radar/${opp.id}`,
+            dedupeKey: `opportunity-approve:${opp.id}`,
+          });
         }
       });
+      if (shortlisted && !settings.autonomy.requireOpportunityApproval) {
+        await transition(db, { machine: "opportunity", id: opp.id, tenantId, to: "pursuing", actor: { type: "system", id: "autonomy" }, reason: "opportunity approval not required by tenant autonomy settings" });
+        await deps.queue.send(QUEUES.proposalGenerate, { tenantId, opportunityId: opp.id }, { singletonKey: opp.id });
+      }
       ctx.summary = message;
       return { status: "refined" as const, recommendation: score.recommendation };
     },

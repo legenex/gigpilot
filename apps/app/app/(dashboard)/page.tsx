@@ -1,7 +1,9 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { ArrowUpRight, Bell, CircleAlert, CircleCheck, Info } from "lucide-react";
-import { BarMeter, MetricStrip, Metric, SectionHeader, Sparkline, StatusDot, cn, formatPct, formatUsd } from "@gigpilot/ui";
+import { BarMeter, MetricStrip, Metric, RecChip, SectionHeader, Sparkline, StatusDot, cn, formatPct, formatUsd } from "@gigpilot/ui";
+import { SampleBadge } from "@/components/sample/sample-badge";
+import { SampleNotice } from "@/components/sample/sample-notice";
 import { OperatingGoals } from "@/components/command-center/goals";
 import { NeedsYou } from "@/components/command-center/needs-you";
 import { RefreshSourcesButton } from "@/components/actions/refresh-sources-button";
@@ -12,6 +14,7 @@ import { StateText } from "@/components/state-badge";
 import { JOB_META, agentName } from "@/lib/labels";
 import { getCommandCenter, type CommandCenterData } from "@/lib/queries/command-center";
 import { listRecentEvents } from "@/lib/queries/events";
+import { getTenantMeta } from "@/lib/queries/tenant";
 import { requireSession } from "@/lib/session";
 import type { JobState } from "@gigpilot/contracts";
 
@@ -23,31 +26,37 @@ function greeting(): string {
   return h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening";
 }
 
+/** "$2.72 simulated · $0 paid" — one spend phrasing everywhere on the page. */
+function spendPhrase(sim: number, paid: number): string {
+  return `${formatUsd(sim, { cents: true })} simulated · ${formatUsd(paid, { cents: paid > 0 })} paid`;
+}
+
 export default async function CommandCenterPage() {
   const ctx = await requireSession();
-  const [data, events] = await Promise.all([getCommandCenter(ctx.tenantId), listRecentEvents(ctx.tenantId, { limit: 40 })]);
+  const [data, events, meta] = await Promise.all([getCommandCenter(ctx.tenantId), listRecentEvents(ctx.tenantId, { limit: 40 }), getTenantMeta(ctx.tenantId)]);
   const c = data.counts;
   const first = ctx.user.name.split(" ")[0] || "there";
   const spendToday = data.spend.todayPaid + data.spend.todaySim;
-  const spend30 = data.spend.d30Paid + data.spend.d30Sim;
   const decisions = data.needsYou.filter((n) => n.kind !== "pursue").length;
   const pipelineMargin = data.pipeline.valueUsd > 0 ? data.pipeline.profitUsd / data.pipeline.valueUsd : null;
+  const today = new Date().toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" });
 
   return (
     <div className="page">
       <PageHeader
-        eyebrow={`Command Center · ${new Date().toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" })}`}
-        title={`${greeting()}, ${first}`}
+        title="Command Center"
+        tagline={`${greeting()}, ${first} · ${today}`}
         description={
           <>
-            {c.opps24h} opportunities in the last 24h · {decisions} decision{decisions === 1 ? "" : "s"} waiting · {c.activeJobs} job{c.activeJobs === 1 ? "" : "s"} in production ·{" "}
-            <span className="font-mono text-xs">{formatUsd(data.spend.todayPaid, { cents: true })}</span> paid spend today
+            {c.opps24h} opportunities in the last 24h · {decisions} decision{decisions === 1 ? "" : "s"} waiting · {c.activeJobs} job{c.activeJobs === 1 ? "" : "s"} in production · spend today{" "}
+            <span className="font-mono text-xs">{spendPhrase(data.spend.todaySim, data.spend.todayPaid)}</span>
           </>
         }
         actions={<RefreshSourcesButton />}
       />
 
       <div className="flex flex-col gap-6">
+        {meta.hasSample ? <SampleNotice tenantId={ctx.tenantId} /> : null}
         <NeedsYou items={data.needsYou} />
 
         <MetricStrip>
@@ -62,17 +71,8 @@ export default async function CommandCenterPage() {
           <Metric label="Active jobs" value={c.activeJobs} sub={`${data.production.filter((p) => p.running > 0).length} executing now`} />
           <Metric label="Final review" value={c.awaitingFinal} sub="deliveries to approve" />
           <Metric label="Open pipeline" value={formatUsd(data.pipeline.valueUsd)} sub={`${data.pipeline.count} opportunities`} />
-          <Metric label="Expected profit" value={formatUsd(data.pipeline.profitUsd)} sub={pipelineMargin === null ? "—" : `${formatPct(pipelineMargin)} blended margin`} />
-          <Metric
-            label="Production spend"
-            value={formatUsd(spendToday, { cents: true })}
-            unit="today"
-            sub={
-              <span className="font-mono text-[11px]">
-                30d {formatUsd(spend30, { cents: true })} · paid {formatUsd(data.spend.d30Paid, { cents: true })}
-              </span>
-            }
-          />
+          <Metric label="Expected profit" value={formatUsd(data.pipeline.profitUsd)} sub={pipelineMargin === null ? "—" : `${formatPct(pipelineMargin)} margin after owner time`} />
+          <Metric label="Spend · today" value={formatUsd(spendToday, { cents: true })} sub={<span className="font-mono text-[11px]">{spendPhrase(data.spend.todaySim, data.spend.todayPaid)}</span>} />
         </MetricStrip>
 
         <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_380px]">
@@ -101,8 +101,8 @@ export default async function CommandCenterPage() {
                   </Link>
                 }
               />
-              <div className="-mx-1.5 max-h-[560px] overflow-y-auto overscroll-contain pr-1">
-                <ActivityStream initial={events} limit={40} />
+              <div className="-mx-1.5 max-h-[560px] overflow-y-auto overscroll-contain px-1.5 pr-1">
+                <ActivityStream initial={events} limit={40} sampleBefore={meta.createdAt.toISOString()} />
               </div>
             </section>
           </aside>
@@ -116,14 +116,14 @@ function Funnel({ data }: { data: CommandCenterData }) {
   const top = Math.max(1, data.funnel[0]?.value ?? 1);
   return (
     <section aria-labelledby="funnel-title">
-      <SectionHeader id="funnel-title" title="Pipeline · 30-day cohort" meta="opportunities discovered in the last 30 days" />
+      <SectionHeader id="funnel-title" title="Pipeline · 30-day cohort" meta="discovered in the last 30 days" />
       <ol className="flex flex-col gap-2">
         {data.funnel.map((f, i) => {
           const prev = i > 0 ? data.funnel[i - 1]!.value : null;
           const conv = prev ? f.value / prev : null;
           return (
-            <li key={f.key} className="grid grid-cols-[112px_minmax(0,1fr)_40px_44px] items-center gap-3">
-              <span className="truncate text-xs text-fg-2">{f.label}</span>
+            <li key={f.key} className="grid grid-cols-[120px_minmax(0,1fr)_40px_44px] items-center gap-3">
+              <span className="text-xs text-fg-2">{f.label}</span>
               <span className="relative h-[14px]">
                 <span className="absolute inset-y-0 left-0 rounded-r-[3px] bg-series-1/85" style={{ width: `${Math.max(f.value > 0 ? 1.5 : 0, (f.value / top) * 100)}%` }} />
               </span>
@@ -133,7 +133,7 @@ function Funnel({ data }: { data: CommandCenterData }) {
           );
         })}
       </ol>
-      <p className="mt-2 text-[11px] text-fg-3">Right column: conversion from the previous stage.</p>
+      <p className="mt-2 text-[11px] text-fg-3">Right column: conversion from the previous stage. Sample history excluded.</p>
     </section>
   );
 }
@@ -141,14 +141,13 @@ function Funnel({ data }: { data: CommandCenterData }) {
 function SpendPanel({ data }: { data: CommandCenterData }) {
   const days = data.daily;
   const max = Math.max(0.01, ...days.map((d) => d.spend));
-  const total = days.reduce((s, d) => s + d.spend, 0);
   const s = data.spend;
   return (
     <section aria-labelledby="spend-title">
       <SectionHeader
         id="spend-title"
-        title="Production spend · 14 days"
-        meta={`${formatUsd(total, { cents: true })} total`}
+        title="Spend · 14 days"
+        meta={spendPhrase(s.d14Sim, s.d14Paid)}
         actions={
           <Link href="/costs" className="flex items-center gap-1 text-xs text-fg-3 hover:text-fg">
             Ledger <ArrowUpRight className="size-3" />
@@ -162,17 +161,15 @@ function SpendPanel({ data }: { data: CommandCenterData }) {
           </div>
         ))}
       </div>
-      <div className="mt-1.5 flex justify-between font-mono text-[10px] text-fg-3">
+      <div className="mt-1.5 flex justify-between font-mono text-[11px] text-fg-3">
         <span>{days[0] ? new Date(`${days[0].day}T00:00:00Z`).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" }) : ""}</span>
         <span>today</span>
       </div>
-      <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1.5 border-t border-line pt-3 text-xs">
-        <dt className="text-fg-3">Paid · today</dt>
-        <dd className="text-right font-mono tabular text-fg">{formatUsd(s.todayPaid, { cents: true })}</dd>
-        <dt className="text-fg-3">Simulated (mock) · today</dt>
-        <dd className="text-right font-mono tabular text-fg-2">{formatUsd(s.todaySim, { cents: true })}</dd>
-        <dt className="text-fg-3">Paid · 30 days</dt>
-        <dd className="text-right font-mono tabular text-fg">{formatUsd(s.d30Paid, { cents: true })}</dd>
+      <dl className="mt-3 grid grid-cols-[minmax(0,1fr)_auto] gap-x-4 gap-y-1.5 border-t border-line pt-3 text-xs">
+        <dt className="text-fg-3">Today</dt>
+        <dd className="whitespace-nowrap text-right font-mono tabular text-fg-2">{spendPhrase(s.todaySim, s.todayPaid)}</dd>
+        <dt className="text-fg-3">14 days</dt>
+        <dd className="whitespace-nowrap text-right font-mono tabular text-fg-2">{spendPhrase(s.d14Sim, s.d14Paid)}</dd>
         <dt className="text-fg-3">Daily paid limit</dt>
         <dd className="text-right font-mono tabular text-fg-2">
           {data.settings.limits.dailyPaidSpendLimitUsd > 0 ? formatUsd(data.settings.limits.dailyPaidSpendLimitUsd, { cents: true }) : <Link href="/settings#limits" className="text-warn hover:underline">$0 · paid off</Link>}
@@ -184,14 +181,15 @@ function SpendPanel({ data }: { data: CommandCenterData }) {
 
 function AgentSummary({ data }: { data: CommandCenterData }) {
   const rows = data.agents.slice(0, 7);
+  const runs = data.agents.reduce((s, a) => s + a.runs, 0);
   return (
     <section aria-labelledby="agents-title">
       <SectionHeader
         id="agents-title"
         title="Agents · 24h"
-        meta={`${data.agents.reduce((s, a) => s + a.runs, 0)} runs`}
+        meta={`${runs} run${runs === 1 ? "" : "s"}`}
         actions={
-          <Link href="/agents" className="flex items-center gap-1 text-xs text-fg-3 hover:text-fg">
+          <Link href="/agents" className="flex items-center gap-1 rounded-sm text-xs text-fg-3 hover:text-fg">
             All runs <ArrowUpRight className="size-3" />
           </Link>
         }
@@ -200,16 +198,16 @@ function AgentSummary({ data }: { data: CommandCenterData }) {
         <p className="py-4 text-xs text-fg-3">No agent runs in the last 24 hours.</p>
       ) : (
         <table className="w-full text-xs">
-          <thead className="sr-only">
-            <tr>
-              <th>Agent</th>
-              <th>Runs</th>
-              <th>Failed</th>
-              <th>Cost</th>
-              <th>Last active</th>
+          <thead>
+            <tr className="font-mono text-[11px] uppercase tracking-[0.05em] text-fg-3">
+              <th scope="col" className="pb-1.5 text-left font-medium">Agent</th>
+              <th scope="col" className="w-10 pb-1.5 text-right font-medium">Runs</th>
+              <th scope="col" className="w-14 pb-1.5 text-right font-medium">Failed</th>
+              <th scope="col" className="w-16 pb-1.5 text-right font-medium">Cost</th>
+              <th scope="col" className="w-12 pb-1.5 text-right font-medium">Last</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-line">
+          <tbody className="divide-y divide-line border-t border-line">
             {rows.map((a) => (
               <tr key={a.agent} className="h-8">
                 <td className="max-w-0 pr-2">
@@ -219,10 +217,10 @@ function AgentSummary({ data }: { data: CommandCenterData }) {
                     {a.running > 0 ? <span className="sr-only">{a.running} running</span> : null}
                   </span>
                 </td>
-                <td className="w-12 text-right font-mono tabular text-fg-2">{a.runs}</td>
-                <td className={cn("w-10 text-right font-mono tabular", a.failed ? "text-warn" : "text-fg-3")}>{a.failed ? `${a.failed}✕` : "—"}</td>
-                <td className="w-16 text-right font-mono tabular text-fg-2">{formatUsd(a.costUsd, { cents: true })}</td>
-                <td className="w-16 text-right">
+                <td className="text-right font-mono tabular text-fg-2">{a.runs}</td>
+                <td className={cn("text-right font-mono tabular", a.failed ? "text-warn" : "text-fg-3")}>{a.failed || "—"}</td>
+                <td className="text-right font-mono tabular text-fg-2">{formatUsd(a.costUsd, { cents: true })}</td>
+                <td className="text-right">
                   <RelTime date={a.lastAt} compact className="font-mono text-[11px] text-fg-3" />
                 </td>
               </tr>
@@ -277,10 +275,16 @@ function ProductionList({ data }: { data: CommandCenterData }) {
   );
 }
 
+/** "$2,317 expected profit at 68% margin" → "$2,317 · 68%" chip for dense alert rows. */
+function alertChip(body: string): string | null {
+  const m = /(−?\$[\d,]+(?:\.\d+)?) expected profit at (\d+)% margin/.exec(body);
+  return m ? `${m[1]} · ${m[2]}%` : null;
+}
+
 function Alerts({ data }: { data: CommandCenterData }) {
-  const unread = data.notifications.filter((n) => !n.read);
+  const unread = data.notifications.filter((n) => !n.read && !n.sample);
   const icon = (k: string) =>
-    k === "alert" ? <CircleAlert className="size-3.5 text-warn" strokeWidth={1.75} /> : k === "success" ? <CircleCheck className="size-3.5 text-profit" strokeWidth={1.75} /> : k === "approval" ? <Bell className="size-3.5 text-accent-hi" strokeWidth={1.75} /> : <Info className="size-3.5 text-info" strokeWidth={1.75} />;
+    k === "alert" ? <CircleAlert className="size-3.5 text-warn" strokeWidth={1.75} /> : k === "success" ? <CircleCheck className="size-3.5 text-profit" strokeWidth={1.75} /> : k === "approval" ? <Bell className="size-3.5 text-fg-2" strokeWidth={1.75} /> : <Info className="size-3.5 text-info" strokeWidth={1.75} />;
   return (
     <section aria-labelledby="alerts-title">
       <SectionHeader id="alerts-title" title="Alerts" meta={unread.length ? `${unread.length} unread` : "all caught up"} />
@@ -289,20 +293,28 @@ function Alerts({ data }: { data: CommandCenterData }) {
       ) : (
         <ul className="-mx-1.5 flex flex-col">
           {data.notifications.slice(0, 5).map((n) => {
+            const chip = alertChip(n.body);
+            const pursue = /^Pursue\s+/.test(n.title);
+            const title = n.title.replace(/^Pursue\s+/, "").replace(/^[“"](.*)[”"]$/, "$1");
+            const shown = n.sample ? n.title.replace(/^Sample data:\s*/i, "") : n.title;
             const inner = (
               <>
                 <span className="mt-[3px] shrink-0">{icon(n.kind)}</span>
                 <span className="min-w-0 flex-1">
-                  <span className={cn("block truncate text-[13px]", n.read ? "text-fg-3" : "text-fg")}>{n.title}</span>
-                  {n.body ? <span className="block truncate text-xs text-fg-3">{n.body}</span> : null}
+                  <span className={cn("line-clamp-2 text-[13px] leading-5", n.read ? "text-fg-3" : "text-fg")}>{pursue ? title : shown}</span>
+                  <span className="mt-0.5 flex flex-wrap items-center gap-1.5">
+                    {pursue ? <RecChip rec="pursue" size="sm" /> : null}
+                    {chip ? <span className="font-mono text-[11px] tabular text-fg-2">{chip}</span> : n.body ? <span className="line-clamp-1 text-xs text-fg-3">{n.body}</span> : null}
+                    {n.sample ? <SampleBadge className="h-4" /> : null}
+                  </span>
                 </span>
-                <RelTime date={n.createdAt} compact className="shrink-0 font-mono text-[10.5px] text-fg-3" />
+                <RelTime date={n.createdAt} compact className="shrink-0 font-mono text-[11px] text-fg-3" />
               </>
             );
             return (
               <li key={n.id}>
                 {n.link ? (
-                  <Link href={n.link} className="flex gap-2.5 rounded-sm px-1.5 py-2 hover:bg-surface-1">
+                  <Link href={n.link} className="focus-inset flex gap-2.5 rounded-sm px-1.5 py-2 hover:bg-surface-1">
                     {inner}
                   </Link>
                 ) : (

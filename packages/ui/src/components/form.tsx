@@ -100,6 +100,7 @@ export function Switch({
   id,
   size = "md",
   testId,
+  tone = "profit",
 }: {
   checked: boolean;
   onCheckedChange: (v: boolean) => void;
@@ -108,6 +109,8 @@ export function Switch({
   id?: string;
   size?: "sm" | "md";
   testId?: string;
+  /** Checked colour. "neutral" (graphite/white) for settings-style toggles; "profit" keeps the legacy green. */
+  tone?: "profit" | "neutral";
 }) {
   return (
     <RSwitch.Root
@@ -118,13 +121,15 @@ export function Switch({
       aria-label={label}
       data-testid={testId}
       className={cn(
-        "relative inline-flex shrink-0 cursor-pointer items-center rounded-full bg-surface-3 ring-1 ring-inset ring-line-strong transition-colors duration-200 disabled:cursor-not-allowed disabled:opacity-45 data-[state=checked]:bg-profit/85 data-[state=checked]:ring-profit/40",
+        "relative inline-flex shrink-0 cursor-pointer items-center rounded-full bg-surface-3 ring-1 ring-inset ring-line-strong transition-colors duration-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-45",
+        tone === "profit" ? "data-[state=checked]:bg-profit/85 data-[state=checked]:ring-profit/40" : "data-[state=checked]:bg-fg/90 data-[state=checked]:ring-fg/60",
         size === "sm" ? "h-4 w-7" : "h-5 w-9",
       )}
     >
       <RSwitch.Thumb
         className={cn(
-          "block rounded-full bg-fg shadow-1 transition-transform duration-200 ease-out",
+          "block rounded-full shadow-1 transition-transform duration-200 ease-out",
+          tone === "neutral" ? "bg-fg data-[state=checked]:bg-bg" : "bg-fg",
           size === "sm" ? "size-3 translate-x-0.5 data-[state=checked]:translate-x-[13px]" : "size-4 translate-x-0.5 data-[state=checked]:translate-x-[18px]",
         )}
       />

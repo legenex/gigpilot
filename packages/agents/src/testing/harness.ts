@@ -138,6 +138,25 @@ export const IMAGE_BRIEF: BriefInput = {
   budgetMaxUsd: 900,
 };
 
+/**
+ * Test oracle: can the deterministic (mock-mode) pipeline honestly deliver this brief? Code briefs
+ * qualify only when the deterministic generator covers every requested feature and the brief does
+ * not require tests (tests can never be executed here → QA escalates to the owner, by design).
+ */
+export async function mockCanDeliver(o: { title: string; description: string; marketKey: string | null; clientName?: string | null }): Promise<boolean> {
+  const { briefRequiresTests, detectRequestedFeatures, featureCoverage } = await import("../heuristics/features");
+  const { generateAutomationArtifact, generateWebArtifact } = await import("../heuristics/code");
+  const family = o.marketKey ?? "";
+  if (family !== "web-app-builds" && family !== "ai-automation") return true;
+  const text = `${o.title}\n${o.description}`;
+  if (briefRequiresTests(text)) return false;
+  const art =
+    family === "web-app-builds"
+      ? generateWebArtifact({ title: o.title, brief: o.description, clientName: o.clientName ?? null, defect: null, repairHint: null })
+      : generateAutomationArtifact({ title: o.title, brief: o.description, defect: null, repairHint: null });
+  return featureCoverage(detectRequestedFeatures(text, family), art.files).missing.length === 0;
+}
+
 let briefSeq = 0;
 
 /** Insert an opportunity as the scout would (status new). */

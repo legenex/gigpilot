@@ -1,6 +1,7 @@
 import type { OpportunityAnalysis } from "@gigpilot/contracts";
-import { triageBudget, type MarketDescriptor } from "@gigpilot/economics";
+import { isCreativeCapability, isInferenceDelivered, triageBudget, type MarketDescriptor } from "@gigpilot/economics";
 import { clamp, familyLabel, money } from "../lib/util";
+import { detectModalities, parseDeadlineDays, requestedFeatureLabels } from "./features";
 import { templateForFamily, type TemplateContext } from "./workflows";
 
 /**
@@ -28,7 +29,7 @@ export interface AnalysisInput {
 }
 
 export const FAMILY_KEYWORDS: Record<string, string[]> = {
-  "paid-social-ugc": ["ugc", "tiktok", "reels", "meta ads", "facebook ads", "ad creative", "ad creatives", "static ads", "hook", "hooks", "paid social", "app install", "ads manager", "sponsored brands", "cpc", "cpi", "video ads", "ad testing", "cutdowns", "product demo", "demo videos", "faceless", "amazon listing", "reels"],
+  "paid-social-ugc": ["ugc", "tiktok", "reels", "meta ads", "facebook ads", "ad creative", "ad creatives", "static ads", "hook", "hooks", "paid social", "app install", "ads manager", "sponsored brands", "cpc", "cpi", "video ads", "ad testing", "cutdowns", "product demo", "demo videos", "faceless", "amazon listing", "reels", "explainer", "explainer video", "animated", "animation", "motion graphics", "promo video", "brand video"],
   "image-design": ["thumbnail", "thumbnails", "product images", "product image", "retouch", "retouching", "mockup", "mockups", "illustration", "illustrations", "illustrated", "brand refresh", "templates", "logo", "banner", "slides", "deck", "canva", "photoshop", "white-background", "composites"],
   "localization-repurposing": ["translate", "translation", "localise", "localize", "localisation", "localization", "subtitles", "srt", "dub", "dubbed", "dubbing", "voiceover", "repurpose", "short clips", "transcripts", "languages", "glossary"],
   "ai-automation": ["automation", "automate", "n8n", "zapier", "make.com", "webhook", "webhooks", "ai agent", "agent", "llm", "rag", "openai", "sync", "pipeline", "integration", "ocr", "triage", "enrichment", "scenarios", "slack alert", "xero", "hubspot"],
@@ -181,8 +182,11 @@ export function analyseOpportunityHeuristically(
   }
 
   const fromDate = input.deadlineAt !== null ? Math.max(0, Math.ceil((input.deadlineAt.getTime() - opts.now.getTime()) / 86_400_000)) : null;
-  // The brief's own wording ("deliver in 9 days") wins when it is tighter than the listing deadline.
-  const deadlineDays = fromDate !== null && p.deadlineDaysFromText !== null ? Math.min(fromDate, p.deadlineDaysFromText) : (fromDate ?? p.deadlineDaysFromText);
+  // Brief wording: "deliver in 9 days", "14 days", "2 weeks", "by October 12" (the tightest wins).
+  const textCandidates = [p.deadlineDaysFromText, parseDeadlineDays(`${input.title}. ${input.description}`, opts.now)].filter((n): n is number => n !== null);
+  const fromText = textCandidates.length ? Math.min(...textCandidates) : null;
+  // The brief's own wording wins when it is tighter than the listing deadline.
+  const deadlineDays = fromDate !== null && fromText !== null ? Math.min(fromDate, fromText) : (fromDate ?? fromText);
   const triage = triageBudget(
     { budgetType: input.budgetType, budgetMinUsd: input.budgetMinUsd, budgetMaxUsd: input.budgetMaxUsd },
     opts.preferredMinBudgetUsd,
@@ -221,10 +225,18 @@ export function analyseOpportunityHeuristically(
 
   switch (family) {
     case "paid-social-ugc": {
-      const V = videos || (statics ? 0 : small ? 2 : 6);
+      const explainer = /\bexplainer\b|\banimat(ed|ion)\b|\bmotion graphics?\b/i.test(lower);
+      const V = videos || (explainer ? 1 : statics ? 0 : small ? 2 : 6);
       const S = statics;
       billableDefault = 20;
-      if (V > 0) {
+      if (V > 0 && explainer && !editingJob) {
+        // One finished animation per requested aspect ratio (a 16:9 + 9:16 explainer is two renders).
+        const formats = p.aspectRatios.length ? p.aspectRatios : [primaryAspect];
+        const label = `${V}× animated explainer video (${duration}s, ${formats.join(" + ")})`;
+        production.push({ label, capability: "video.generate", units: V * formats.length, attemptsPerUnit: 2.5 });
+        deliverables.push({ item: `Animated explainer video (${duration}s)`, quantity: V, format: `MP4 ${formats.join(" + ")}` });
+        tmpl.primary = { capability: "video.generate", label, aspectRatio: formats[0] };
+      } else if (V > 0) {
         const label = editingJob ? `${V}× edited ${primaryAspect} ad (${duration}s)` : `${V}× ${primaryAspect} UGC-style video (${duration}s)`;
         production.push(
           editingJob
@@ -237,7 +249,7 @@ export function analyseOpportunityHeuristically(
       if (S > 0) {
         const label = `${S}× static ad creative (${S && p.aspectRatios.length > 1 ? p.aspectRatios.slice(0, 2).join(" + ") : secondaryAspect})`;
         production.push({ label, capability: "image.generate", units: S, attemptsPerUnit: 1.8 });
-        deliverables.push({ item: `Static ad creative (${p.aspectRatios.slice(0, 2).join(", ") || secondaryAspect})`, quantity: S, format: "PNG + editable source" });
+        deliverables.push({ item: `Static ad creative (${p.aspectRatios.slice(0, 2).join(", ") || secondaryAspect})`, quantity: S, format: "PNG / SVG" });
         const staticAspect = p.aspectRatios.includes("4:5") ? "4:5" : p.aspectRatios.includes("1:1") ? "1:1" : secondaryAspect;
         if (tmpl.primary) tmpl.secondary = { capability: "image.generate", label, aspectRatio: staticAspect };
         else tmpl.primary = { capability: "image.generate", label, aspectRatio: staticAspect };
@@ -276,7 +288,7 @@ export function analyseOpportunityHeuristically(
         const aspect = /thumbnail/i.test(lower) ? "16:9" : primaryAspect;
         const label = `${I}× ${noun} (${aspect})`;
         production.push({ label, capability: "image.generate", units: I, attemptsPerUnit: 1.6 });
-        deliverables.push({ item: noun.charAt(0).toUpperCase() + noun.slice(1), quantity: I, format: aspect === "16:9" ? "1920×1080 PNG" : "PNG + source" });
+        deliverables.push({ item: noun.charAt(0).toUpperCase() + noun.slice(1), quantity: I, format: aspect === "16:9" ? "1920×1080 PNG" : "PNG / SVG" });
         tmpl.primary = { capability: "image.generate", label, aspectRatio: aspect };
         humanHours = 1.5 + 0.12 * I;
       }
@@ -360,6 +372,35 @@ export function analyseOpportunityHeuristically(
     }
   }
 
+  // Unpriced / extra modalities must never be dropped silently: each one gets its own production
+  // estimate so the economics engine prices it — or flags the estimate incomplete when no
+  // priced route exists (voiceover, dubbing, music, 3D).
+  const videoUnits = Math.max(1, maxCount(p, ["video", "clip"]) || production.filter((e) => e.capability.startsWith("video.")).reduce((a, e) => a + e.units, 0) || 1);
+  for (const m of detectModalities(text)) {
+    const has = production.some((e) => e.capability === m.capability) || (m.capability === "audio.voiceover" && production.some((e) => e.capability === "audio.dub"));
+    if (has) continue;
+    if (m.capability === "video.generate") {
+      const formats = p.aspectRatios.length ? p.aspectRatios : [primaryAspect];
+      const label = `${videoUnits}× animated video (${duration}s, ${formats.join(" + ")})`;
+      production.push({ label, capability: "video.generate", units: videoUnits * formats.length, attemptsPerUnit: 2.5 });
+      deliverables.push({ item: `Animated video (${duration}s)`, quantity: videoUnits, format: `MP4 ${formats.join(" + ")}` });
+      if (!tmpl.primary) tmpl.primary = { capability: "video.generate", label, aspectRatio: formats[0] };
+      else if (!tmpl.secondary) tmpl.secondary = { capability: "video.generate", label, aspectRatio: formats[0] };
+    } else if (m.capability === "audio.voiceover") {
+      production.push({ label: `${videoUnits}× voiceover / narration (${duration}s)`, capability: "audio.voiceover", units: videoUnits, attemptsPerUnit: 1.5 });
+      deliverables.push({ item: "Voiceover / narration track", quantity: videoUnits, format: "WAV/MP3" });
+    } else if (m.capability === "audio.dub") {
+      production.push({ label: `${videoUnits}× dubbed audio track`, capability: "audio.dub", units: videoUnits, attemptsPerUnit: 1.5 });
+      deliverables.push({ item: "Dubbed audio track", quantity: videoUnits, format: "WAV/MP3" });
+    } else if (m.capability === "audio.music") {
+      production.push({ label: "Music / sound design", capability: "audio.music", units: 1, attemptsPerUnit: 1.5 });
+      deliverables.push({ item: "Music / sound design", quantity: 1, format: "WAV/MP3" });
+    } else if (m.capability === "model.3d") {
+      production.push({ label: "3D model / render", capability: "model.3d", units: 1, attemptsPerUnit: 1.5 });
+      deliverables.push({ item: "3D model / render", quantity: 1, format: "GLB / render" });
+    }
+  }
+
   const billableHours = hourly ? (p.hours ?? billableDefault) : null;
   if (hourly && billableHours) humanHours = Math.max(humanHours, 0.3 * billableHours);
   humanHours = round1(Math.max(small ? 0.75 : 1, humanHours));
@@ -399,8 +440,10 @@ export function analyseOpportunityHeuristically(
     requiredAssets.push("Source files or transcripts", "Glossary / style guide");
     if (!/transcripts?|scripts?|source|project files|recordings|footage|blurb|listing/i.test(lower)) missingInputs.push("Source transcripts or project files");
   } else {
-    requiredAssets.push("Research questions / brief", "Existing data or notes");
+    requiredAssets.push("Research questions / brief", "Existing data or notes (optional)");
   }
+  const gaps = reconcileMissingInputs(requiredAssets, p.supplied, missingInputs, lower);
+  missingInputs.splice(0, missingInputs.length, ...gaps);
   if (missingInputs.length) risks.push({ kind: "input", severity: "low", note: `Missing: ${missingInputs.join("; ")}` });
 
   // --- scores --------------------------------------------------------------
@@ -454,6 +497,9 @@ export function analyseOpportunityHeuristically(
     lowBudget ? "Budget below the preferred minimum — analysed cheaply; unlikely to clear the gates" : `Owner time estimated at ${humanHours}h; production priced from the catalog`,
   ];
 
+  const requestedFeatures = requestedFeatureLabels(text, family);
+  if (requestedFeatures.length) buyerPriorities.push(`Requested features: ${requestedFeatures.slice(0, 5).join(", ")}`);
+
   return {
     summary,
     clientRequest: input.description.replace(/\s+/g, " ").slice(0, 400),
@@ -465,7 +511,7 @@ export function analyseOpportunityHeuristically(
     skills,
     risks,
     deadlineDays,
-    productionEstimates: production,
+    productionEstimates: production.map(withPricedVia),
     inferenceEstimates: inference,
     humanHours,
     billableHours,
@@ -476,12 +522,76 @@ export function analyseOpportunityHeuristically(
     deadlineRisk: round2(clamp(deadlineRisk, 0.05, 0.95)),
     confidence: round2(clamp(confidence, 0.3, 0.92)),
     rationale,
-    buyerPriorities: buyerPriorities.slice(0, 4),
+    buyerPriorities: buyerPriorities.slice(0, 5),
+    requestedFeatures,
   };
 }
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
+}
+
+type ProductionEstimate = OpportunityAnalysis["productionEstimates"][number];
+
+/** How a production unit type is priced (deterministic; never taken from a model). */
+export function pricedViaFor(capability: string): NonNullable<ProductionEstimate["pricedVia"]> {
+  if (isCreativeCapability(capability)) return "creative";
+  if (isInferenceDelivered(capability)) return "inference";
+  if (capability === "media.finishing") return "local";
+  return "unpriced";
+}
+
+function withPricedVia(e: ProductionEstimate): ProductionEstimate {
+  return { ...e, pricedVia: pricedViaFor(e.capability) };
+}
+
+const ASSET_SYNONYMS: Record<string, string[]> = {
+  guidelines: ["guidelines", "brand kit", "brand guide", "style guide", "fonts", "palette", "colours", "colors"],
+  logo: ["logo", "brand kit", "brand assets"],
+  imagery: ["imagery", "photos", "photo", "shots", "images", "footage", "screenshots", "screen recordings", "recordings", "samples", "artwork", "product photography", "raw photos", "clips"],
+  footage: ["footage", "clips", "recordings", "videos", "photos", "shots"],
+  sandbox: ["sandbox", "staging", "test account", "api keys", "api access", "access"],
+  credentials: ["credentials", "api keys", "api key", "keys", "access", "sandbox", "tokens", "token"],
+  designs: ["designs", "figma", "wireframes", "mockups", "design files"],
+  wireframes: ["wireframes", "figma", "designs", "mockups"],
+  copy: ["copy", "content", "text", "copy supplied", "copy provided"],
+  hosting: ["hosting", "domain", "server", "vercel", "admin access"],
+  transcripts: ["transcripts", "transcript", "scripts", "script", "source files", "project files", "premiere projects", "srt"],
+  source: ["source files", "project files", "transcripts", "scripts", "recordings", "footage", "listing", "blurb"],
+  glossary: ["glossary", "style guide", "terminology", "brand terms", "tone guide"],
+  questions: ["questions", "research questions", "brief", "decision"],
+  data: ["data", "notes", "csv", "export", "spreadsheet", "reports", "tickets"],
+};
+
+function assetCovered(required: string, supplied: string[], briefLower: string): boolean {
+  const r = required.toLowerCase();
+  const keys = Object.keys(ASSET_SYNONYMS).filter((k) => r.includes(k));
+  const terms = keys.length ? keys.flatMap((k) => ASSET_SYNONYMS[k]!) : r.split(/[^a-z0-9]+/).filter((w) => w.length >= 5);
+  const suppliedText = supplied.join(" \n ").toLowerCase();
+  const supplySentences = briefLower
+    .split(/(?<=[.!?])\s+|\n+/)
+    .filter((sent) => /\b(supplied|provided|provide|supply|we have|we'll share|we will share|attached|included|access to|ready)\b/.test(sent))
+    .join(" \n ");
+  return terms.some((t) => suppliedText.includes(t) || supplySentences.includes(t));
+}
+
+/**
+ * missingInputs = the heuristic's explicit gaps ∪ required assets that nothing supplied covers.
+ * Keeps the analysis internally consistent: it can never report "0 missing" while a required
+ * asset is not supplied.
+ */
+export function reconcileMissingInputs(required: string[], supplied: string[], missing: string[], briefLower: string): string[] {
+  const out = [...new Set(missing.map((m) => m.trim()).filter(Boolean))];
+  const mentioned = (req: string) => out.some((m) => m.toLowerCase().includes(req.toLowerCase().split(/[\s(/]+/)[0]!) || req.toLowerCase().includes(m.toLowerCase().split(/[\s(/]+/)[0]!));
+  for (const r of required) {
+    if (/\(optional\)/i.test(r)) continue;
+    // The listing itself is the brief when it states the work in detail.
+    if (/\bbrief\b/i.test(r) && briefLower.length >= 150) continue;
+    if (assetCovered(r, supplied, briefLower)) continue;
+    if (mentioned(r)) continue;
+    out.push(r);
+  }
+  return out.slice(0, 8);
 }
 
 /**
@@ -491,10 +601,17 @@ function round2(n: number): number {
 export function sanitiseAnalysis(model: OpportunityAnalysis, baseline: OpportunityAnalysis): OpportunityAnalysis {
   const families = Object.keys(FAMILY_KEYWORDS);
   const serviceFamily = families.includes(model.serviceFamily) ? model.serviceFamily : baseline.serviceFamily;
-  const production = (model.productionEstimates.length ? model.productionEstimates : baseline.productionEstimates).map((e) => ({
+  const modelProduction = model.productionEstimates.length ? model.productionEstimates : baseline.productionEstimates;
+  // A model may never drop a modality triage found (voiceover, dubbing, music, 3D, animation):
+  // re-add baseline estimates whose capability the model left out, so they are priced or flagged.
+  const dropped = baseline.productionEstimates.filter(
+    (b) => (pricedViaFor(b.capability) === "unpriced" || b.capability.startsWith("video.")) && !modelProduction.some((m) => m.capability === b.capability),
+  );
+  const production = [...modelProduction, ...dropped].map((e) => ({
     ...e,
     units: clamp(e.units, 0, 500),
     attemptsPerUnit: clamp(e.attemptsPerUnit, 1, 6),
+    pricedVia: pricedViaFor(e.capability),
   }));
   const inference = (model.inferenceEstimates.length ? model.inferenceEstimates : baseline.inferenceEstimates).map((e) => ({
     ...e,
@@ -502,6 +619,9 @@ export function sanitiseAnalysis(model: OpportunityAnalysis, baseline: Opportuni
     kTokensOut: clamp(e.kTokensOut, 0, 200),
     calls: clamp(e.calls, 0, 200),
   }));
+  const requiredAssets = model.requiredAssets.length ? model.requiredAssets : baseline.requiredAssets;
+  const suppliedAssets = model.suppliedAssets.length ? model.suppliedAssets : baseline.suppliedAssets;
+  const requestedFeatures = [...new Set([...(baseline.requestedFeatures ?? []), ...(model.requestedFeatures ?? []).map((f) => f.trim()).filter((f) => f.length >= 3 && f.length <= 80)])].slice(0, 16);
   return {
     ...model,
     serviceFamily,
@@ -509,9 +629,14 @@ export function sanitiseAnalysis(model: OpportunityAnalysis, baseline: Opportuni
     inferenceEstimates: inference,
     humanHours: clamp(model.humanHours, 0.5, 200),
     billableHours: model.billableHours === null ? baseline.billableHours : clamp(model.billableHours, 0, 400),
+    deadlineDays: model.deadlineDays ?? baseline.deadlineDays,
     deliverables: model.deliverables.length ? model.deliverables : baseline.deliverables,
+    requiredAssets,
+    suppliedAssets,
+    // Consistent with requiredAssets − suppliedAssets (never "0 missing" while a required asset is not supplied).
+    missingInputs: reconcileMissingInputs(requiredAssets, suppliedAssets, model.missingInputs, `${model.clientRequest} ${baseline.clientRequest}`.toLowerCase()),
     proposedWorkflow: model.proposedWorkflow.length ? model.proposedWorkflow : baseline.proposedWorkflow,
     rationale: model.rationale.length ? model.rationale.slice(0, 8) : baseline.rationale,
+    requestedFeatures,
   };
 }
-

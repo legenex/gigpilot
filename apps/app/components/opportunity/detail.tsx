@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { ArrowUpRight } from "lucide-react";
 import { cn, formatUsd } from "@gigpilot/ui";
+import { fmtDate } from "@/lib/format";
 import { sourceName } from "@/lib/labels";
 import type { OpportunityDetail } from "@/lib/queries/opportunity";
 import { DecisionPanel } from "./decision-panel";
@@ -43,6 +44,32 @@ function showProposal(d: OpportunityDetail) {
   return Boolean(d.currentProposal) || ["pursuing", "applied", "won", "lost"].includes(d.opp.status);
 }
 
+function submissionCopy(d: OpportunityDetail, src: string): string {
+  if (d.opp.sourceKey === "mock") return "Demo marketplace submission — simulated after your approval; nothing leaves GigPilot";
+  return d.autoSubmit ? `Automatic via the official ${src} API, after your approval` : `Manual — you submit on ${src}; GigPilot prepares the text`;
+}
+
+/** Secondary numbers that the Radar table drops below 1536px live in the pane. */
+function PaneFacts({ d }: { d: OpportunityDetail }) {
+  const e = d.estimate?.breakdown;
+  const items: [string, string][] = [
+    ["Est. cost", e ? formatUsd(e.totalCostUsd - e.platformFeesUsd) : "—"],
+    ["Platform fees", e ? formatUsd(e.platformFeesUsd) : "—"],
+    ["Deadline", d.opp.deadlineAt ? fmtDate(d.opp.deadlineAt) : "—"],
+    ["Posted", fmtDate(d.opp.postedAt ?? d.opp.createdAt)],
+  ];
+  return (
+    <dl className="grid grid-cols-2 gap-x-5 gap-y-1.5 text-xs sm:grid-cols-4">
+      {items.map(([k, v]) => (
+        <div key={k}>
+          <dt className="text-[11px] text-fg-3">{k}</dt>
+          <dd className="font-mono text-[12px] tabular text-fg">{v}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
 /** Full page: main narrative column + sticky decision rail. */
 export function OpportunityPage({ d }: { d: OpportunityDetail }) {
   const src = sourceName(d.opp.sourceKey);
@@ -65,7 +92,7 @@ export function OpportunityPage({ d }: { d: OpportunityDetail }) {
       <aside className="xl:sticky xl:top-5 xl:self-start" aria-label="Decision">
         <div className="rounded-md bg-surface-1 p-4 ring-1 ring-inset ring-line">
           <p className="eyebrow mb-3">Decision</p>
-          <Gates gates={d.score?.gates ?? null} settings={d.settings} />
+          <Gates gates={d.score?.gates ?? null} settings={d.settings} estimate={d.estimate?.breakdown ?? null} />
           <div className="mt-4 border-t border-line pt-4">
             <DecisionPanel {...decisionProps(d)} layout="rail" />
           </div>
@@ -82,7 +109,7 @@ export function OpportunityPage({ d }: { d: OpportunityDetail }) {
         <dl className="mt-4 space-y-3 px-1 text-xs">
           <div>
             <dt className="eyebrow mb-0.5">Submission</dt>
-            <dd className="text-fg-2">{d.autoSubmit ? `Automatic via the official ${src} API, after your approval` : `Manual — you submit on ${src}; GigPilot prepares the text`}</dd>
+            <dd className="text-fg-2">{submissionCopy(d, src)}</dd>
           </div>
           {d.capabilities ? (
             <div>
@@ -92,7 +119,7 @@ export function OpportunityPage({ d }: { d: OpportunityDetail }) {
           ) : null}
           <div>
             <dt className="eyebrow mb-0.5">Opportunity ID</dt>
-            <dd className="font-mono text-[11px] text-fg-3">{d.opp.id}</dd>
+            <dd className="break-all font-mono text-[11px] text-fg-3">{d.opp.id}</dd>
           </div>
         </dl>
       </aside>
@@ -107,8 +134,9 @@ export function OpportunityPane({ d }: { d: OpportunityDetail }) {
     <div className="flex flex-col gap-5">
       <OppHeader d={d} size="pane" />
       <KeyNumbers d={d} variant="pane" />
+      <PaneFacts d={d} />
       <div className={cn("rounded-md bg-surface-1 p-3.5 ring-1 ring-inset ring-line")}>
-        <Gates gates={d.score?.gates ?? null} settings={d.settings} />
+        <Gates gates={d.score?.gates ?? null} settings={d.settings} estimate={d.estimate?.breakdown ?? null} />
         <div className="mt-3 border-t border-line pt-3">
           <DecisionPanel {...decisionProps(d)} layout="pane" />
         </div>

@@ -3,6 +3,7 @@ export * from "./lib/format";
 export * from "./components/logo";
 export * from "./components/button";
 export * from "./components/badge";
+export * from "./components/rec-chip";
 export * from "./components/status-dot";
 export * from "./components/panel";
 export * from "./components/metric";

@@ -6,23 +6,23 @@ export function RadarSection() {
   const rows = radarRows();
   const T = DEFAULTS.thresholds;
   return (
-    <Section id="radar" index="02" name="Opportunity Radar" stage="Discover · Analyse · Price" labelledBy="radar-title">
+    <Section id="radar" index="02" name="Opportunity Radar" stage="Discover · Analyze · Price" labelledBy="radar-title">
       <SectionIntro
         id="radar-title"
         title="Every permitted source. One ranked queue."
         lead={
           <>
             Official APIs where the marketplace permits them, notification parsing for Contra and Fiverr, public feeds and your own
-            prospects — normalised, de-duplicated, expired after {DEFAULTS.sourcing.opportunityMaxAgeHours} hours and priced before you
+            prospects — normalized, de-duplicated, expired after {DEFAULTS.sourcing.opportunityMaxAgeHours} hours and priced before you
             ever see them.
           </>
         }
         aside={
           <ul className="mt-6 grid grid-cols-2 gap-x-6 gap-y-2 border-t border-line pt-4 sm:grid-cols-3">
             {SOURCES.map((s) => (
-              <li key={s.key} className="flex items-baseline justify-between gap-2 sm:block">
-                <span className="text-[13px] text-fg">{s.label}</span>{" "}
-                <span className="font-mono text-[10.5px] uppercase tracking-[0.07em] text-fg-muted sm:block">{s.mode}</span>
+              <li key={s.key}>
+                <span className="block text-[13px] text-fg">{s.label}</span>
+                <span className="block font-mono text-[11px] uppercase tracking-[0.06em] text-fg-muted">{s.mode}</span>
               </li>
             ))}
           </ul>

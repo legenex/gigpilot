@@ -57,7 +57,7 @@ export function BarMeter({
  * `invert` colours high values as risk (e.g. revision risk).
  */
 export function MiniMeter({ value, invert, className }: { value: number | null | undefined; invert?: boolean; className?: string }) {
-  if (value === null || value === undefined || !Number.isFinite(value)) return <span className="font-mono text-xs text-fg-4">—</span>;
+  if (value === null || value === undefined || !Number.isFinite(value)) return <span className="font-mono text-xs text-fg-3">—</span>;
   const v = Math.max(0, Math.min(1, value));
   const good = invert ? 1 - v : v;
   const tone: Tone = good >= 0.66 ? "profit" : good >= 0.4 ? "warn" : "risk";
@@ -72,8 +72,10 @@ export function MiniMeter({ value, invert, className }: { value: number | null |
 }
 
 /**
- * Goal meter: shows a target band [min,max] on a scale and the actual value
- * as a marker + fill. Status is conveyed by label text, not colour alone.
+ * Goal meter: the target band [min,max] is a 12% fill with hairline bound
+ * ticks; the actual value is a 2px tick in its status colour over a hairline
+ * baseline. No thumb — it is a readout, not a control. Status is also
+ * conveyed by label text next to it, never by colour alone.
  */
 export function TargetMeter({
   value,
@@ -93,23 +95,20 @@ export function TargetMeter({
   lowerIsBetter?: boolean;
 }) {
   const top = Math.max(scaleMax ?? max * 1.25, value, max) || 1;
-  const pos = (n: number) => `${Math.max(0, Math.min(1, n / top)) * 100}%`;
+  const frac = (n: number) => Math.max(0, Math.min(1, n / top));
+  const pos = (n: number) => `${frac(n) * 100}%`;
   const inBand = value >= min && value <= max;
   const tone: Tone = lowerIsBetter ? (value <= max ? "profit" : value <= max * 1.5 ? "warn" : "risk") : inBand || value > max ? "profit" : value >= min * 0.5 ? "warn" : "risk";
+  const lo = lowerIsBetter ? 0 : min;
+  // Keep the value tick fully inside the track at the extremes.
+  const tickLeft = `clamp(0px, calc(${pos(value)} - 1px), calc(100% - 2px))`;
   return (
-    <div className={cn("relative h-5 w-full", className)} role="meter" aria-label={label} aria-valuenow={value} aria-valuemin={0} aria-valuemax={top}>
-      <div className="absolute inset-x-0 top-1/2 h-1 -translate-y-1/2 rounded-full bg-surface-3" />
-      <div
-        className="absolute top-1/2 h-3 -translate-y-1/2 rounded-[3px] bg-white/[0.06] ring-1 ring-inset ring-line-bright"
-        style={{ left: pos(lowerIsBetter ? 0 : min), width: `calc(${pos(max)} - ${pos(lowerIsBetter ? 0 : min)})` }}
-        aria-hidden
-      />
-      <div className={cn("absolute left-0 top-1/2 h-1 -translate-y-1/2 rounded-full transition-[width] duration-700 ease-out", fills[tone])} style={{ width: pos(value) }} />
-      <div
-        className={cn("absolute top-1/2 size-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full ring-2 ring-bg transition-[left] duration-700 ease-out", fills[tone])}
-        style={{ left: pos(value) }}
-        aria-hidden
-      />
+    <div className={cn("relative h-4 w-full", className)} role="meter" aria-label={label} aria-valuenow={value} aria-valuemin={0} aria-valuemax={top}>
+      <div className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-line-strong" aria-hidden />
+      <div className="absolute inset-y-0.5 bg-fg/[0.12]" style={{ left: pos(lo), width: `calc(${pos(max)} - ${pos(lo)})` }} aria-hidden />
+      {lowerIsBetter ? null : <div className="absolute inset-y-0 w-px bg-line-bright" style={{ left: pos(min) }} aria-hidden />}
+      <div className="absolute inset-y-0 w-px bg-line-bright" style={{ left: `calc(${pos(max)} - 1px)` }} aria-hidden />
+      <div className={cn("absolute -inset-y-0.5 w-[2px] rounded-[1px] transition-[left] duration-700 ease-out", fills[tone])} style={{ left: tickLeft }} aria-hidden />
     </div>
   );
 }

@@ -12,7 +12,7 @@ import {
 } from "@gigpilot/agents";
 import { integrationByKey } from "@gigpilot/contracts";
 import { and, audit, eq, getDb, saveTenantSecret, sourceIntegration } from "@gigpilot/db";
-import { INBOUND_SECRET_NAME, INBOUND_SECRET_PROVIDER_KEY, checkIntegration, clearCredentialCache } from "@gigpilot/providers";
+import { INBOUND_SECRET_NAME, INBOUND_SECRET_PROVIDER_KEY, checkIntegration, clearCredentialCache, getSourceAdapter } from "@gigpilot/providers";
 import { runAction } from "./run";
 
 const PATHS = ["/integrations", "/"];
@@ -62,13 +62,26 @@ export async function refreshAllSourcesAction() {
     "source.refresh-all",
     async (ctx) => {
       const rows = await getDb()
-        .select({ key: sourceIntegration.sourceKey })
+        .select({ key: sourceIntegration.sourceKey, lastSyncAt: sourceIntegration.lastSyncAt })
         .from(sourceIntegration)
         .where(and(eq(sourceIntegration.tenantId, ctx.tenantId), eq(sourceIntegration.enabled, true)));
-      for (const r of rows) await triggerSourceRefresh(ctx, r.key);
-      return { count: rows.length };
+      // Mirror the Scout's source-policy throttle so the toast says what the stream will say.
+      const now = Date.now();
+      const throttled: { name: string; waitMin: number }[] = [];
+      let queued = 0;
+      for (const r of rows) {
+        const caps = getSourceAdapter(r.key)?.capabilities;
+        const elapsed = r.lastSyncAt ? (now - r.lastSyncAt.getTime()) / 60_000 : Infinity;
+        if (caps && caps.canSearch && elapsed < caps.minPollIntervalMinutes) {
+          throttled.push({ name: getSourceAdapter(r.key)?.name ?? r.key, waitMin: Math.ceil(caps.minPollIntervalMinutes - elapsed) });
+        } else if (!caps || caps.canSearch) {
+          queued += 1;
+        }
+        await triggerSourceRefresh(ctx, r.key);
+      }
+      return { count: rows.length, queued, throttled };
     },
-    { revalidate: ["/radar", "/"], limit: 6, message: "Refresh queued for enabled sources" },
+    { revalidate: ["/radar", "/"], limit: 6 },
   );
 }
 

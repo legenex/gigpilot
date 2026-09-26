@@ -1,13 +1,15 @@
 import { ArrowUpRight, CircleCheck, CircleDashed, CircleX, ShieldCheck, TriangleAlert } from "lucide-react";
 import type { ReactNode } from "react";
-import { Badge, Callout, cn, formatPct, formatUsd } from "@gigpilot/ui";
+import { Badge, Callout, RecChip, cn, formatPct, formatUsd } from "@gigpilot/ui";
 import type { EconomicsBreakdown, ScoreGates } from "@gigpilot/db";
 import { Dag } from "@/components/dag/dag";
 import { RelTime } from "@/components/rel-time";
+import { SampleBadge } from "@/components/sample/sample-badge";
 import { StateBadge } from "@/components/state-badge";
 import { fmtBudget, fmtDate } from "@/lib/format";
-import { OPPORTUNITY_META, RECOMMENDATION_META, agentName, sourceName } from "@/lib/labels";
+import { OPPORTUNITY_META, agentName, cleanMessage, isSystemEvent, routeId, routeLabel, serviceFamilyLabel, sourceName } from "@/lib/labels";
 import type { OpportunityDetail } from "@/lib/queries/opportunity";
+import { isSample } from "@/lib/sample";
 
 /** Numbered section with mono eyebrow — hairline above, no box. */
 export function Section({ n, title, meta, children, id, className, actions }: { n?: string; title: string; meta?: ReactNode; children: ReactNode; id?: string; className?: string; actions?: ReactNode }) {
@@ -32,18 +34,19 @@ export function OppHeader({ d, size = "page" }: { d: OpportunityDetail; size?: "
   return (
     <div>
       <div className="mb-2 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs text-fg-3">
-        <span className="font-mono text-[10.5px] uppercase tracking-[0.08em] text-fg-2">{sourceName(o.sourceKey)}</span>
+        <span className="font-mono text-[11px] uppercase tracking-[0.08em] text-fg-2">{sourceName(o.sourceKey)}</span>
         {o.url ? (
           <a href={o.url} target="_blank" rel="noopener noreferrer nofollow" className="inline-flex items-center gap-0.5 text-fg-3 hover:text-fg" aria-label={`Open original listing on ${sourceName(o.sourceKey)} (new tab)`}>
             original <ArrowUpRight className="size-3" />
           </a>
         ) : null}
         <span aria-hidden>·</span>
-        <span>{d.marketName ?? "Unclassified"}</span>
+        <span>{o.marketKey ? serviceFamilyLabel(o.marketKey) : (d.marketName ?? "Unclassified")}</span>
         <span aria-hidden>·</span>
         <span>
           posted <RelTime date={o.postedAt ?? o.createdAt} />
         </span>
+        {isSample(o.createdAt, d.sampleBefore) ? <SampleBadge /> : null}
         <StateBadge meta={meta} className="ml-auto" dataStatus={o.status} testId="opp-status" />
       </div>
       <h1 data-testid="opp-title" className={cn("text-fg", size === "page" ? "font-display text-[22px] font-semibold leading-7 tracking-[-0.025em] md:text-[24px] md:leading-8" : "text-[16px] font-semibold leading-6 tracking-[-0.01em]")}>
@@ -63,13 +66,16 @@ export function OppHeader({ d, size = "page" }: { d: OpportunityDetail; size?: "
 export function KeyNumbers({ d, variant = "page" }: { d: OpportunityDetail; variant?: "page" | "pane" }) {
   const o = d.opp;
   const e = d.estimate?.breakdown;
-  const rec = o.recommendation ? RECOMMENDATION_META[o.recommendation] : null;
   const cells: { label: string; value: ReactNode; sub?: ReactNode; testId?: string; tone?: string }[] = [
     { label: "Budget", value: fmtBudget(o.budgetType, o.budgetMinUsd, o.budgetMaxUsd), sub: o.budgetType === "unknown" ? "not stated" : o.budgetType, testId: "opp-budget" },
     { label: "Price", value: e ? formatUsd(e.priceUsd) : "—", sub: e ? e.priceBasis.replace(/_/g, " ") : "not priced yet" },
-    { label: "Exp. profit", value: e ? formatUsd(e.grossProfitUsd) : "—", sub: e ? `after ${formatUsd(e.totalCostUsd)} costs` : undefined, testId: "opp-expected-profit", tone: e ? (e.grossProfitUsd >= d.settings.thresholds.minExpectedProfitUsd ? "text-profit" : "text-risk") : undefined },
-    { label: "Margin", value: e ? formatPct(e.grossMargin) : "—", sub: `target ≥ ${formatPct(d.settings.thresholds.minGrossMargin)}`, testId: "opp-margin", tone: e ? (e.grossMargin >= d.settings.thresholds.minGrossMargin ? "text-profit" : "text-risk") : undefined },
-    { label: "Recommendation", value: rec ? rec.label : "Pending", sub: o.overallScore !== null ? `score ${Math.round(o.overallScore * 100)}` : "analysis running" },
+    { label: "Exp. profit", value: e ? formatUsd(e.grossProfitUsd) : "—", sub: e ? `after ${formatUsd(e.totalCostUsd)} costs incl. owner time` : undefined, testId: "opp-expected-profit", tone: e ? (e.grossProfitUsd >= d.settings.thresholds.minExpectedProfitUsd ? "text-profit" : "text-risk") : undefined },
+    { label: "Margin", value: e ? formatPct(e.grossMargin) : "—", sub: `after owner time · target ≥ ${formatPct(d.settings.thresholds.minGrossMargin)}`, testId: "opp-margin", tone: e ? (e.grossMargin >= d.settings.thresholds.minGrossMargin ? "text-profit" : "text-risk") : undefined },
+    {
+      label: "Recommendation",
+      value: <RecChip rec={o.recommendation} pending={o.status === "analysing" ? "analysing" : "queued"} className="h-6 px-2 text-[12px]" />,
+      sub: o.overallScore !== null ? `score ${Math.round(o.overallScore * 100)}` : "analysis running",
+    },
   ];
   const shown = variant === "pane" ? cells.slice(0, 4) : cells;
   return (
@@ -77,10 +83,10 @@ export function KeyNumbers({ d, variant = "page" }: { d: OpportunityDetail; vari
       {shown.map((c) => (
         <div key={c.label} className={cn("bg-bg px-3 py-2.5", variant === "page" && "last:col-span-2 sm:last:col-span-1")}>
           <dt className="text-[11px] text-fg-3">{c.label}</dt>
-          <dd data-testid={c.testId} className={cn("mt-0.5 truncate text-[16px] font-semibold tracking-[-0.01em] text-fg", c.tone)}>
+          <dd data-testid={c.testId} className={cn("mt-0.5 flex h-6 items-center truncate text-[16px] font-semibold tracking-[-0.01em] text-fg", c.tone)}>
             {c.value}
           </dd>
-          {c.sub ? <dd className="truncate text-[11px] text-fg-3">{c.sub}</dd> : null}
+          {c.sub ? <dd className="text-[11px] leading-4 text-fg-3">{c.sub}</dd> : null}
         </div>
       ))}
     </dl>
@@ -102,21 +108,27 @@ function GateRow({ id, label, pass, detail, soft }: { id: string; label: string;
       <span className="flex-1 text-[13px] text-fg">
         {label}
         <span className="sr-only">: {pass === null ? "not evaluated" : pass ? "pass" : "fail"}</span>
-        {soft ? <span className="ml-1.5 font-mono text-[10px] uppercase tracking-[0.06em] text-fg-3">soft</span> : null}
+        {soft ? <span className="ml-1.5 font-mono text-[11px] uppercase tracking-[0.06em] text-fg-3">soft</span> : null}
       </span>
-      <span className="font-mono text-[11.5px] tabular text-fg-2">{detail}</span>
+      <span className="whitespace-nowrap font-mono text-[11.5px] tabular text-fg-2">{detail}</span>
     </li>
   );
 }
 
-export function Gates({ gates, settings }: { gates: ScoreGates | null; settings: OpportunityDetail["settings"] }) {
+/**
+ * Business gates. "Estimate complete" reads the estimate itself (complete +
+ * missing prices), never a cached gate, so it can't contradict the receipt.
+ */
+export function Gates({ gates, settings, estimate }: { gates: ScoreGates | null; settings: OpportunityDetail["settings"]; estimate?: EconomicsBreakdown | null }) {
   const t = settings.thresholds;
+  const complete = estimate ? estimate.complete && estimate.missing.length === 0 : gates ? gates.complete.pass : null;
+  const missingN = estimate?.missing.length ?? 0;
   return (
     <ul className="divide-y divide-line" aria-label="Business gates">
       <GateRow id="budget" label="Budget" soft pass={gates ? gates.budget.pass : null} detail={gates ? `${gates.budget.value === null ? "—" : formatUsd(gates.budget.value)} / ≥ ${formatUsd(t.preferredMinBudgetUsd)}` : `≥ ${formatUsd(t.preferredMinBudgetUsd)}`} />
       <GateRow id="profit" label="Expected profit" pass={gates ? gates.profit.pass : null} detail={gates ? `${formatUsd(gates.profit.value)} / ≥ ${formatUsd(gates.profit.threshold)}` : `≥ ${formatUsd(t.minExpectedProfitUsd)}`} />
       <GateRow id="margin" label="Gross margin" pass={gates ? gates.margin.pass : null} detail={gates ? `${formatPct(gates.margin.value)} / ≥ ${formatPct(gates.margin.threshold)}` : `≥ ${formatPct(t.minGrossMargin)}`} />
-      <GateRow id="complete" label="Estimate complete" pass={gates ? gates.complete.pass : null} detail={gates ? (gates.complete.pass ? "all prices known" : "missing prices") : "—"} />
+      <GateRow id="complete" label="Estimate complete" pass={complete} detail={complete === null ? "—" : complete ? "all prices known" : missingN ? `${missingN} unpriced` : "missing prices"} />
     </ul>
   );
 }
@@ -179,9 +191,31 @@ export function BriefSection({ d, n = "01", clamp }: { d: OpportunityDetail; n?:
   );
 }
 
+const norm = (x: string) => x.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+const tokens = (x: string) => norm(x).split(" ").filter((w) => w.length >= 3 && !["and", "the", "for", "with", "option"].includes(w));
+/** a ≈ contained in b when most of a's significant words appear in b. */
+const mostlyIn = (a: string, b: string) => {
+  const ta = tokens(a);
+  if (!ta.length) return false;
+  const tb = new Set(tokens(b));
+  return ta.filter((w) => tb.has(w)).length / ta.length >= 0.75;
+};
+
+/** Missing = what the analyst flagged + every required asset the client hasn't supplied (required − supplied). */
+export function missingInputsOf(a: { requiredAssets: string[]; suppliedAssets: string[]; missingInputs: string[] }): string[] {
+  const out = [...a.missingInputs];
+  for (const req of a.requiredAssets) {
+    if (a.suppliedAssets.some((s) => mostlyIn(req, s) || mostlyIn(s, req))) continue;
+    if (out.some((m) => mostlyIn(req, m))) continue;
+    out.push(req);
+  }
+  return out;
+}
+
 export function ScopeSection({ d, n = "02" }: { d: OpportunityDetail; n?: string }) {
   const a = d.analysis;
   if (!a) return null;
+  const missing = missingInputsOf(a);
   return (
     <Section n={n} title="Scope" meta={`${a.deliverables.length} deliverable${a.deliverables.length === 1 ? "" : "s"}${a.deadlineDays ? ` · ${a.deadlineDays}-day deadline` : ""}`} id="scope">
       <ul className="divide-y divide-line">
@@ -196,7 +230,7 @@ export function ScopeSection({ d, n = "02" }: { d: OpportunityDetail; n?: string
       <div className="mt-4 grid gap-4 sm:grid-cols-3">
         <AssetList title="Supplied by client" items={a.suppliedAssets} tone="profit" empty="Nothing supplied yet" />
         <AssetList title="Required to start" items={a.requiredAssets} tone="neutral" empty="No extra assets" />
-        <AssetList title="Missing inputs" items={a.missingInputs} tone="warn" empty="None — ready to start" />
+        <AssetList title="Missing inputs" items={missing} tone="warn" empty="None — ready to start" />
       </div>
     </Section>
   );
@@ -225,48 +259,76 @@ function AssetList({ title, items, tone, empty }: { title: string; items: string
   );
 }
 
+type Coverage = NonNullable<EconomicsBreakdown["coverage"]>[number];
+
+const INFERENCE_CAPS = /^(text\.|code\.|qa\.review$)/;
+
+/** How a production unit is priced: the estimate's own coverage first, then the analysis hint, then the capability. */
+function pricingOf(p: { label: string; capability: string; pricedVia?: string }, coverage: Coverage[] | undefined, route: { option: { provider: string; model: string } } | undefined): { text: string; warn?: boolean; title?: string } {
+  const cov = coverage?.find((c) => c.label === p.label) ?? coverage?.find((c) => c.capability === p.capability);
+  const via = cov?.pricedVia ?? p.pricedVia ?? (INFERENCE_CAPS.test(p.capability) ? "inference" : p.capability === "media.finishing" ? "local" : route ? "creative" : "unpriced");
+  if (via === "inference") return { text: "Priced via inference", title: "Delivered by model calls — priced in the inference lines below" };
+  if (via === "local") return { text: "Local tooling · $0" };
+  if (via === "unpriced") return { text: "No priced route", warn: true, title: cov?.note ?? "No catalog route prices this capability yet — the estimate is marked incomplete" };
+  const provider = cov?.provider ?? route?.option.provider ?? null;
+  const model = cov?.model ?? route?.option.model ?? null;
+  const label = routeLabel(provider, model);
+  const simulated = cov?.routeStatus === "simulated" && label !== "Simulated";
+  return { text: `${label}${simulated ? " (simulated)" : ""}`, title: [routeId(provider, model), cov?.note].filter(Boolean).join(" — ") || undefined, warn: cov?.routeStatus === "unavailable" };
+}
+
+function inferenceRoute(family: string): string {
+  if (family === "gx") return "Local model · free";
+  if (family === "grok") return "Grok · web research";
+  if (family === "mock") return "Simulated";
+  return "Cloud model · Factory";
+}
+
 export function PlanSection({ d, n = "03", compact }: { d: OpportunityDetail; n?: string; compact?: boolean }) {
   const a = d.analysis;
   if (!a) return null;
   const routeFor = (label: string) => d.routes.find((r) => r.label === label);
+  const coverage = d.estimate?.breakdown?.coverage;
+  const meta = d.analysisMeta;
+  const stage = meta ? (meta.provider === "heuristic" ? "Preliminary triage" : `Deep analysis · ${routeLabel(meta.provider, meta.model)}`) : null;
   return (
-    <Section n={n} title="Production plan" meta={d.analysisMeta ? `analysed by ${d.analysisMeta.provider}/${d.analysisMeta.model} · v${d.analysisMeta.version}` : undefined} id="plan">
+    <Section n={n} title="Production plan" meta={stage ? <span title={meta ? routeId(meta.provider, meta.model) : undefined}>{`${stage} · v${meta!.version}`}</span> : undefined} id="plan">
       <Dag nodes={a.proposedWorkflow.map((s) => ({ key: s.key, name: s.name, agent: s.agent, kind: s.kind, dependsOn: s.dependsOn }))} compact label="Proposed workflow" />
       {!compact || a.productionEstimates.length ? (
         <div className="mt-4 overflow-x-auto">
           <table className="w-full min-w-[520px] text-[13px]">
             <thead>
-              <tr className="text-left font-mono text-[10.5px] uppercase tracking-[0.06em] text-fg-3">
+              <tr className="text-left font-mono text-[11px] uppercase tracking-[0.05em] text-fg-3">
                 <th className="pb-1.5 font-medium">Estimate</th>
                 <th className="pb-1.5 text-right font-medium">Units</th>
                 <th className="pb-1.5 text-right font-medium">Attempts / unit</th>
-                <th className="pb-1.5 pl-4 font-medium">Selected route</th>
+                <th className="pb-1.5 pl-4 font-medium">Priced by</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-line">
               {a.productionEstimates.map((p) => {
-                const r = routeFor(p.label);
+                const pr = pricingOf(p, coverage, routeFor(p.label));
                 return (
                   <tr key={p.label} className="h-8">
-                    <td className="text-fg">
-                      {p.label} <span className="font-mono text-[10.5px] text-fg-3">{p.capability}</span>
-                    </td>
+                    <td className="text-fg">{p.label}</td>
                     <td className="text-right font-mono text-xs tabular text-fg-2">{p.units}</td>
                     <td className="text-right font-mono text-xs tabular text-fg-2">{p.attemptsPerUnit.toFixed(1)}</td>
-                    <td className="pl-4 font-mono text-xs text-fg-2">{r ? `${r.option.provider}/${r.option.model}` : <span className="text-warn">no priced route</span>}</td>
+                    <td className={cn("pl-4 text-xs", pr.warn ? "text-warn" : "text-fg-2")} title={pr.title}>
+                      {pr.text}
+                    </td>
                   </tr>
                 );
               })}
               {a.inferenceEstimates.map((x) => (
                 <tr key={x.task} className="h-8">
                   <td className="text-fg">
-                    {x.task} <span className="font-mono text-[10.5px] text-fg-3">inference</span>
+                    {x.task} <span className="text-[11px] text-fg-3">· inference</span>
                   </td>
                   <td className="text-right font-mono text-xs tabular text-fg-2">{x.calls} calls</td>
                   <td className="text-right font-mono text-xs tabular text-fg-2">
                     {x.kTokensIn}k/{x.kTokensOut}k tok
                   </td>
-                  <td className="pl-4 font-mono text-xs text-fg-2">{x.family === "gx" ? "gx (local, $0)" : x.family === "grok" ? "grok · web research" : "factory · router auto"}</td>
+                  <td className="pl-4 text-xs text-fg-2">{inferenceRoute(x.family)}</td>
                 </tr>
               ))}
             </tbody>
@@ -274,16 +336,19 @@ export function PlanSection({ d, n = "03", compact }: { d: OpportunityDetail; n?
         </div>
       ) : null}
       {d.routes.length ? (
-        <ul className="mt-3 space-y-1.5">
-          {d.routes.map((r) => (
-            <li key={r.label} className="flex gap-2 text-xs leading-5 text-fg-3">
-              <ShieldCheck className="mt-0.5 size-3.5 shrink-0 text-fg-3" strokeWidth={1.75} aria-hidden />
-              <span>
-                <span className="text-fg-2">{r.label}:</span> {r.rationale}
-              </span>
-            </li>
-          ))}
-        </ul>
+        <details className="mt-3 text-xs text-fg-3">
+          <summary className="cursor-pointer select-none rounded-xs hover:text-fg-2">Why these creative routes</summary>
+          <ul className="mt-1.5 space-y-1.5">
+            {d.routes.map((r) => (
+              <li key={r.label} className="flex gap-2 leading-5">
+                <ShieldCheck className="mt-0.5 size-3.5 shrink-0 text-fg-3" strokeWidth={1.75} aria-hidden />
+                <span>
+                  <span className="text-fg-2">{r.label}:</span> {r.rationale}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </details>
       ) : null}
     </Section>
   );
@@ -294,7 +359,7 @@ function ReceiptRow({ label, value, sub, strong, tone }: { label: ReactNode; val
     <div className={cn("flex items-baseline gap-3 py-1.5", strong && "text-fg")}>
       <span className={cn("min-w-0 flex-1 text-[13px]", strong ? "font-medium text-fg" : "text-fg-2")}>
         {label}
-        {sub ? <span className="ml-2 font-mono text-[10.5px] text-fg-3">{sub}</span> : null}
+        {sub ? <span className="ml-2 font-mono text-[11px] text-fg-3">{sub}</span> : null}
       </span>
       <span className={cn("shrink-0 font-mono text-[12.5px] tabular", strong ? "font-semibold" : "", tone ?? "text-fg")}>{value}</span>
     </div>
@@ -320,7 +385,7 @@ export function EconomicsReceipt({ e, n = "04", sourceKey, compact }: { e: Econo
         <div className="mb-2 overflow-x-auto">
           <table className="w-full min-w-[520px] text-[13px]">
             <thead>
-              <tr className="text-left font-mono text-[10.5px] uppercase tracking-[0.06em] text-fg-3">
+              <tr className="text-left font-mono text-[11px] uppercase tracking-[0.05em] text-fg-3">
                 <th className="pb-1.5 font-medium">Line item</th>
                 <th className="pb-1.5 font-medium">Route</th>
                 <th className="pb-1.5 text-right font-medium">Qty × attempts × unit</th>
@@ -336,11 +401,14 @@ export function EconomicsReceipt({ e, n = "04", sourceKey, compact }: { e: Econo
                       {li.category}
                     </Badge>
                   </td>
-                  <td className="font-mono text-xs text-fg-3">{li.provider ? `${li.provider}/${li.model ?? "—"}` : "unassigned"}</td>
-                  <td className="text-right font-mono text-xs tabular text-fg-2">
-                    {Number(li.quantity.toFixed(2))} × {Number(li.attempts.toFixed(2))} × {li.unitCostUsd === null ? <span className="text-warn">?</span> : formatUsd(li.unitCostUsd, { cents: true })}
+                  <td className={cn("text-xs", li.provider ? "text-fg-3" : "text-warn")} title={[li.provider ? routeId(li.provider, li.model) : null, li.routeNote].filter(Boolean).join(" — ") || undefined}>
+                    {li.provider ? routeLabel(li.provider, li.model) : "No priced route"}
+                    {li.routeStatus === "simulated" && li.provider && routeLabel(li.provider, li.model) !== "Simulated" ? <span className="ml-1 text-fg-3">(simulated)</span> : null}
                   </td>
-                  <td className="text-right font-mono text-xs tabular text-fg">{li.totalUsd === null ? <span className="text-warn">unknown</span> : formatUsd(li.totalUsd, { cents: true })}</td>
+                  <td className="text-right font-mono text-xs tabular text-fg-2">
+                    {Number(li.quantity.toFixed(2))} × {Number(li.attempts.toFixed(2))} × {li.unitCostUsd === null ? <span className="text-warn">unpriced</span> : formatUsd(li.unitCostUsd, { cents: true })}
+                  </td>
+                  <td className="text-right font-mono text-xs tabular text-fg">{li.totalUsd === null ? <span className="whitespace-nowrap text-warn">— unpriced</span> : formatUsd(li.totalUsd, { cents: true })}</td>
                 </tr>
               ))}
             </tbody>
@@ -348,15 +416,22 @@ export function EconomicsReceipt({ e, n = "04", sourceKey, compact }: { e: Econo
         </div>
       ) : null}
       <div className="divide-y divide-line border-t border-line">
-        <ReceiptRow label="Fulfilment (production + inference)" value={formatUsd(e.fulfilmentCostUsd, { cents: true })} sub={`${e.lineItems.length} line items`} />
+        <ReceiptRow
+          label="Fulfilment (production + inference)"
+          value={formatUsd(e.fulfilmentCostUsd, { cents: true })}
+          sub={`${e.lineItems.length} line items${e.lineItems.some((l) => l.totalUsd === null) ? ` · ${e.lineItems.filter((l) => l.totalUsd === null).length} unpriced, not included` : ""}`}
+        />
         <ReceiptRow label="Revision contingency" value={formatUsd(e.revisionContingencyUsd, { cents: true })} />
         <ReceiptRow label="General contingency" value={formatUsd(e.contingencyUsd, { cents: true })} />
         <ReceiptRow label="Human shadow cost" value={formatUsd(e.shadowCostUsd, { cents: true })} sub="owner time" />
         <ReceiptRow label="Platform fees" value={formatUsd(fee, { cents: true })} sub={sourceName(e.platformFeeKey || sourceKey)} />
         <ReceiptRow label="Total cost" value={formatUsd(e.totalCostUsd, { cents: true })} strong />
         <ReceiptRow label="Price" value={formatUsd(e.priceUsd, { cents: true })} sub={e.priceBasis.replace(/_/g, " ")} />
-        <ReceiptRow label="Gross profit" value={formatUsd(e.grossProfitUsd, { cents: true })} strong tone={e.grossProfitUsd >= 0 ? "text-profit" : "text-risk"} />
-        <ReceiptRow label="Gross margin" value={formatPct(e.grossMargin, 1)} strong tone={e.grossMargin >= 0 ? "text-profit" : "text-risk"} />
+        <ReceiptRow label="Profit after owner time" value={formatUsd(e.grossProfitUsd, { cents: true })} strong tone={e.grossProfitUsd >= 0 ? "text-profit" : "text-risk"} />
+        <ReceiptRow label="Margin after owner time" value={formatPct(e.grossMargin, 1)} strong tone={e.grossMargin >= 0 ? "text-profit" : "text-risk"} />
+        {e.priceUsd > 0 ? (
+          <ReceiptRow label="Cash margin (ex. owner time)" value={formatPct((e.grossProfitUsd + e.shadowCostUsd) / e.priceUsd, 1)} sub="before valuing your time" tone="text-fg-2" />
+        ) : null}
         <ReceiptRow label="Break-even price" value={formatUsd(e.breakEvenPriceUsd, { cents: true })} sub="profit = $0" />
       </div>
     </Section>
@@ -397,7 +472,7 @@ export function RisksSection({ d, n = "05" }: { d: OpportunityDetail; n?: string
         <ul className="divide-y divide-line">
           {risks.map((r, i) => (
             <li key={i} className="flex items-baseline gap-3 py-1.5">
-              <span className={cn("w-14 shrink-0 font-mono text-[10.5px] uppercase tracking-[0.06em]", r.severity === "high" ? "text-risk" : r.severity === "medium" ? "text-warn" : "text-fg-3")}>{r.severity}</span>
+              <span className={cn("w-14 shrink-0 font-mono text-[11px] uppercase tracking-[0.06em]", r.severity === "high" ? "text-risk" : r.severity === "medium" ? "text-warn" : "text-fg-3")}>{r.severity}</span>
               <span className="w-20 shrink-0 text-xs text-fg-3">{r.kind}</span>
               <span className="min-w-0 flex-1 text-[13px] text-fg-2">{r.note}</span>
             </li>
@@ -444,17 +519,17 @@ export function RationaleSection({ d, n = "07", withEvents }: { d: OpportunityDe
           )}
         </div>
       </div>
-      {withEvents && d.events.length ? (
+      {withEvents && d.events.some((e) => !isSystemEvent(e.type)) ? (
         <div className="mt-5">
           <p className="mb-2 text-xs text-fg-3">Evidence trail</p>
           <ol className="relative space-y-0.5 border-l border-line pl-4">
-            {d.events.map((e) => (
+            {d.events.filter((e) => !isSystemEvent(e.type)).map((e) => (
               <li key={e.id} className="relative py-1">
                 <span className={cn("absolute -left-[19.5px] top-[11px] size-[7px] rounded-full ring-2 ring-bg", e.level === "success" ? "bg-profit" : e.level === "warn" ? "bg-warn" : e.level === "error" ? "bg-risk" : "bg-fg-3")} aria-hidden />
                 <p className="flex items-baseline gap-2 text-[13px] text-fg-2">
-                  <span className="shrink-0 font-mono text-[10.5px] uppercase tracking-[0.06em] text-fg-3">{agentName(e.agent)}</span>
-                  <span className="min-w-0 flex-1">{e.message}</span>
-                  <RelTime date={e.createdAt} className="shrink-0 font-mono text-[10.5px] text-fg-3" />
+                  <span className="shrink-0 font-mono text-[11px] uppercase tracking-[0.06em] text-fg-3">{agentName(e.agent)}</span>
+                  <span className="min-w-0 flex-1">{cleanMessage(e.message)}</span>
+                  <RelTime date={e.createdAt} className="shrink-0 font-mono text-[11px] text-fg-3" />
                 </p>
               </li>
             ))}

@@ -60,7 +60,8 @@ export const APPLICATION_TRANSITIONS: Record<ApplicationState, readonly Applicat
   awaiting_approval: ["approved", "draft", "expired", "lost"],
   approved: ["submitted", "awaiting_approval", "expired"],
   submitted: ["client_response", "won", "lost", "expired"],
-  client_response: ["negotiating", "won", "lost"],
+  // client_response → expired: no update for settings.sourcing.applicationExpiryDays.
+  client_response: ["negotiating", "won", "lost", "expired"],
   negotiating: ["won", "lost", "client_response"],
   won: [],
   lost: [],

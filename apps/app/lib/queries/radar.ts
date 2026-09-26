@@ -51,6 +51,12 @@ export interface RadarFilters {
   sel?: string;
 }
 
+export interface RadarViewCounts {
+  pursue: number;
+  review: number;
+  all: number;
+}
+
 type SP = Record<string, string | string[] | undefined>;
 const str = (sp: SP, k: string) => {
   const v = sp[k];
@@ -119,8 +125,11 @@ export interface RadarRow {
   estimateComplete: boolean | null;
 }
 
+const PURSUE_NOW = () => and(eq(opportunity.recommendation, "pursue"), inArray(opportunity.status, ["analysed", "shortlisted"]));
+
+/** Views are disjoint where they overlap in intent: "Needs review" never repeats a "Pursue now" row. */
 function viewCondition(view: RadarView): SQL | undefined {
-  if (view === "pursue") return and(eq(opportunity.recommendation, "pursue"), inArray(opportunity.status, ["analysed", "shortlisted"]));
+  if (view === "pursue") return PURSUE_NOW();
   if (view === "review")
     return and(
       inArray(opportunity.status, ["new", "analysing", "analysed", "shortlisted", "pursuing"]),
@@ -129,6 +138,7 @@ function viewCondition(view: RadarView): SQL | undefined {
         eq(opportunity.estimateComplete, false),
         inArray(opportunity.status, ["shortlisted", "pursuing", "new", "analysing"]),
       ),
+      sql`not coalesce((${PURSUE_NOW()}), false)`,
     );
   return ne(opportunity.status, "archived");
 }

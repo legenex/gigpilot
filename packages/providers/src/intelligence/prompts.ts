@@ -94,7 +94,7 @@ export const OPPORTUNITY_ANALYSIS_GUIDE = [
   "GigPilot prices work deterministically from YOUR QUANTITIES — so never output prices, rates or money amounts anywhere.",
   "",
   "Field guidance:",
-  "- summary: one sentence. clientRequest: what the client literally asked for. serviceFamily: short slug such as ugc_video, product_photos, ai_automation, web_app, copywriting, translation, research.",
+  "- summary: one sentence. clientRequest: what the client literally asked for. serviceFamily: exactly one of paid-social-ugc, image-design, localization-repurposing, ai-automation, web-app-builds, research-content.",
   "- deliverables: one entry per distinct output; quantity is a count; format e.g. \"9:16 MP4, 15s\".",
   "- suppliedAssets = what the client provides; requiredAssets = what the work needs; missingInputs = required but not supplied yet.",
   `- risks[].kind ∈ {${RISK_KINDS}}; severity ∈ {low, medium, high}; note ≤ 20 words.`,
@@ -102,7 +102,8 @@ export const OPPORTUNITY_ANALYSIS_GUIDE = [
   "",
   "productionEstimates — one entry per generated/produced unit type:",
   `- capability ∈ {${CAPABILITIES}}.`,
-  "- Use image.* / video.* only for AI-generated media; text.copy for scripts/captions/copy; code.build / code.automation for software; media.finishing for editing, captions, music, assembly; qa.review for checking.",
+  "- Use image.* / video.* only for AI-generated media (animation / motion graphics / explainer videos are video.generate); audio.voiceover for voiceover or narration, audio.dub for dubbing, audio.music for music / sound design / podcast audio, model.3d for 3D; text.copy for scripts/captions/copy; code.build / code.automation for software; media.finishing for editing, captions, assembly; qa.review for checking.",
+  "- Every requested modality needs its own entry even when GigPilot cannot price it (e.g. a voiceover) — never drop one to make the job look cheaper. Leave pricedVia out (GigPilot sets it).",
   "- units = number of deliverable units (images, clips, pages, scripts). For VIDEO only, put the clip length in seconds in the label, e.g. \"9:16 UGC video 15s\" (GigPilot reads the \"15s\"). Never add a seconds suffix to images or other outputs (\"Product photo 2000x2000\", not \"… 2000s\").",
   "- One entry per deliverable type: never split a stated range into several entries — use the upper bound (\"3 videos of 15–20s\" → ONE entry, units 3, label \"… 20s\").",
   "- attemptsPerUnit ≥ 1 = expected generations per usable result (typical: images 1.3–2, AI video 2–3, copy/code 1–1.5).",
@@ -118,27 +119,31 @@ export const OPPORTUNITY_ANALYSIS_GUIDE = [
   "proposedWorkflow — ordered execution steps (3–8 steps):",
   "- key: unique, lowercase [a-z0-9_-] only, e.g. brief, scripts, gen_video, assemble, qa, deliver.",
   `- kind ∈ {${STEP_KINDS}}. Use generate only for AI image/video/audio generation; software work uses code and test; writing uses copy.`,
-  "- agent: who runs it — one of planner, researcher, copywriter, creative, editor, engineer, qa, owner.",
+  "- agent: who runs it — one of researcher, copywriter, creative, coder, automation, localiser, finisher, qa.",
   "- capability (optional) uses the same list as productionEstimates; estimateLabel repeats the matching productionEstimates label exactly.",
   "- dependsOn: keys of EARLIER steps only. acceptance: 1–3 checkable criteria.",
   "- Always include a qa step before finalize/deliver.",
   "",
   "Scores are numbers in [0,1]: fitScore (how well AI-assisted production fits), complexity, revisionRisk, deadlineRisk, confidence (in this analysis).",
   "rationale: 2–5 short user-visible reasons. buyerPriorities: what the client cares about most (2–4 items).",
+  "requestedFeatures: concrete features the brief explicitly asks for (e.g. \"Stripe billing\", \"Magic-link login\", \"Document upload\", \"Webhook tests\"); [] when none.",
 ].join("\n");
 
 export const PROPOSAL_GUIDE = [
   "You draft a freelance proposal for the owner to review (it is never sent automatically).",
   "- headline: ≤ 12 words. coverLetter: 120–250 words, specific to the brief, plain text, no placeholders like [Name], no contact details, no links.",
-  "- scope: concrete items the price covers. priceUsd and timelineDays: use the values supplied by GigPilot in the prompt — do not invent your own numbers.",
+  "- scope: ONLY items from the planned deliverables/workflow supplied by GigPilot. Never promise artifacts the plan does not produce (e.g. layered/editable source files, recorded walkthroughs, extra revision rounds) unless they are listed.",
+  "- priceUsd and timelineDays: use the values supplied by GigPilot in the prompt — do not invent your own numbers. The revision rounds are fixed by GigPilot too.",
   "- assumptions: what the price assumes. questions: 1–3 clarifying questions for the client.",
 ].join("\n");
 
 export const QA_GUIDE = [
-  "You are an independent QA reviewer. Judge the deliverable strictly against the acceptance criteria provided.",
+  "You are a QA reviewer. Judge the deliverable strictly against EACH acceptance criterion provided, using the artifact file list and contents shown.",
+  "- For every requested feature / criterion with no evidence in the artifact, emit a MAJOR finding with code \"missing_feature\" naming it.",
   "- verdict is \"pass\" only if no major or critical finding exists. score in [0,1].",
   "- findings[].code: short snake_case id; severity ∈ {minor, major, critical}; criterion names the acceptance criterion; repairHint says how to fix it.",
-  "- summary: one or two sentences.",
+  "- Do not repeat the deterministic check results (they are already recorded). Tests cannot be executed in this environment — do not report that.",
+  "- summary: one or two sentences, factual; never claim tests passed.",
 ].join("\n");
 
 export const MARKET_INSIGHT_GUIDE = [
