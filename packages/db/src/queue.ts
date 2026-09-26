@@ -45,7 +45,14 @@ export async function createBoss(opts: { max?: number; supervise?: boolean; sche
     schedule: opts.schedule ?? false,
   });
   boss.on("error", (err: unknown) => {
-    console.error(JSON.stringify({ level: "error", msg: "queue error", error: err instanceof Error ? err.message : String(err) }));
+    const e = err as { message?: unknown; code?: unknown; name?: unknown } | null;
+    const detail =
+      err instanceof Error
+        ? `${err.name}: ${err.message}`
+        : e && typeof e === "object"
+          ? String(e.message ?? e.code ?? e.name ?? JSON.stringify(e).slice(0, 300))
+          : String(err);
+    console.error(JSON.stringify({ level: "error", msg: "queue error", error: detail }));
   });
   await boss.start();
   await ensureQueues(boss);

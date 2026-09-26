@@ -1,8 +1,8 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, gt } from "drizzle-orm";
 import { SERVICE_FAMILIES } from "@gigpilot/config/defaults";
 import { INTEGRATIONS, SOURCE_KEYS, defaultTenantSettings, resolveTenantSettings, type TenantSettings } from "@gigpilot/contracts";
 import type { Executor } from "./client";
-import { market, membership, providerIntegration, sourceIntegration, tenant } from "./schema";
+import { market, membership, providerIntegration, session, sourceIntegration, tenant } from "./schema";
 import { audit } from "./transitions";
 
 const MARKET_KEYWORDS: Record<string, string[]> = {
@@ -128,5 +128,20 @@ export async function assertMember(db: Executor, userId: string, tenantId: strin
 
 export async function listTenantIds(db: Executor): Promise<string[]> {
   const rows = await db.select({ id: tenant.id }).from(tenant);
+  return rows.map((r) => r.id);
+}
+
+/**
+ * Tenants with a member session active within `days`. Used to keep
+ * demo-marketplace sourcing and market research (local GX inference) from
+ * running forever for abandoned/test workspaces.
+ */
+export async function listActiveTenantIds(db: Executor, days: number, now: Date = new Date()): Promise<string[]> {
+  const since = new Date(now.getTime() - days * 86_400_000);
+  const rows = await db
+    .selectDistinct({ id: membership.tenantId })
+    .from(membership)
+    .innerJoin(session, eq(session.userId, membership.userId))
+    .where(gt(session.updatedAt, since));
   return rows.map((r) => r.id);
 }

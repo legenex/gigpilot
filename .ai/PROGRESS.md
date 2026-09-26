@@ -24,3 +24,6 @@
 - Docs: README, docs/ARCHITECTURE.md, docs/RUNBOOK.md, ops/gx10-01/README.md.
 - E2E: playwright.config.ts + e2e/{auth,demo-flow,smoke}.spec.ts against a data-testid contract
   sent to the dashboard specialist.
+- Integrations specialist finished (158 tests; live GX 12/12 valid analyses); committed f0e45af with ops/docs/e2e.
+- ~02:50 SAST: agent-system, dashboard and marketing specialists hit an API session limit
+  (reset 05:50). Resumed all three at 19:52 SAST from their transcripts; work on disk intact.

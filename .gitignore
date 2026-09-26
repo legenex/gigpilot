@@ -25,9 +25,9 @@ ops/vps/*.env
 !ops/vps/*.env.example
 
 # runtime data (generated/private assets, db volumes, backups)
-data/
-storage/
-var/
+/data/
+/storage/
+/var/
 *.dump
 *.sql.gz
 

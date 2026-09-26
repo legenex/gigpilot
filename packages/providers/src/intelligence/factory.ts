@@ -196,12 +196,13 @@ export class FactoryProvider implements IntelligenceProvider {
   }
 
   private childEnv(key: string): NodeJS.ProcessEnv {
-    const env: NodeJS.ProcessEnv = { FACTORY_API_KEY: key, NO_COLOR: "1", CI: "1" };
+    const env: Record<string, string> = { FACTORY_API_KEY: key, NO_COLOR: "1", CI: "1" };
     for (const name of ["PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"]) {
       const v = process.env[name];
       if (v) env[name] = v;
     }
-    return env;
+    // Minimal child env (no inherited secrets); cast because Next augments ProcessEnv with NODE_ENV.
+    return env as unknown as NodeJS.ProcessEnv;
   }
 
   private async run(bin: string, key: string, prompt: string, signal?: AbortSignal): Promise<string> {
@@ -256,7 +257,7 @@ export class FactoryProvider implements IntelligenceProvider {
     if (!bin) return { status: "needs_configuration", detail: problems.join("; "), checkedAt, meta: { binaryFound: false, keyPresent: Boolean(key) } };
     const started = Date.now();
     const exec = this.opts.exec ?? defaultExec;
-    const res = await exec(bin, ["--version"], { env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" }, timeoutMs: 10_000 });
+    const res = await exec(bin, ["--version"], { env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" } as unknown as NodeJS.ProcessEnv, timeoutMs: 10_000 });
     const latencyMs = Date.now() - started;
     const version = (res.stdout || res.stderr).trim().split("\n")[0]?.slice(0, 80);
     if (res.code !== 0) return { status: "error", detail: `droid --version failed (exit ${res.code}).`, latencyMs, checkedAt };

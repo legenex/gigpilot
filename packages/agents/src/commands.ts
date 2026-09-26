@@ -11,6 +11,7 @@ import {
   integrationByKey,
   resolveTenantSettings,
   tenantSettingsSchema,
+  type QueuePayloads,
   type TenantSettingsInput,
 } from "@gigpilot/contracts";
 import {
@@ -18,6 +19,7 @@ import {
   application,
   audit,
   clearTenantSecret,
+  costLedgerEntry,
   delivery,
   desc,
   emitEvent,
@@ -459,6 +461,20 @@ export async function approveFinalDelivery(ctx: CommandContext, jobId: string) {
       patch: { completedAt: new Date() },
       event: { type: "job.state", level: "success", agent: "orchestrator", subjectType: "job", subjectId: j.id, jobId: j.id, message: `Delivered: ${j.title}` },
     });
+    // Estimate vs actual: record the contract value and marketplace fee as actuals on delivery (once).
+    const ledger = await tx
+      .select({ category: costLedgerEntry.category, kind: costLedgerEntry.kind, amountUsd: costLedgerEntry.amountUsd, provider: costLedgerEntry.provider })
+      .from(costLedgerEntry)
+      .where(eq(costLedgerEntry.jobId, j.id));
+    if (!ledger.some((l) => l.category === "revenue" && l.kind === "actual")) {
+      const feeEstimate = ledger.find((l) => l.category === "marketplace_fee" && l.kind === "estimate");
+      await tx.insert(costLedgerEntry).values([
+        { tenantId: ctx.tenantId, jobId: j.id, opportunityId: j.opportunityId, category: "revenue", kind: "actual", amountUsd: j.priceUsd, memo: "Contract value (delivered)" },
+        ...(feeEstimate
+          ? [{ tenantId: ctx.tenantId, jobId: j.id, opportunityId: j.opportunityId, category: "marketplace_fee" as const, kind: "actual" as const, provider: feeEstimate.provider, amountUsd: feeEstimate.amountUsd, memo: "Marketplace fee on delivery" }]
+          : []),
+      ]);
+    }
   });
 }
 
@@ -607,7 +623,7 @@ export async function updateSourceConfig(ctx: CommandContext, sourceKey: string,
 /** User-directed refresh (the only permitted way to search Upwork). */
 export async function triggerSourceRefresh(ctx: CommandContext, sourceKey: string) {
   requireOperator(ctx);
-  await enqueue(QUEUES.sourceRefresh, { tenantId: ctx.tenantId, sourceKey }, { singletonKey: `${ctx.tenantId}:${sourceKey}` });
+  await enqueue(QUEUES.sourceRefresh, { tenantId: ctx.tenantId, sourceKey, trigger: "user" } as QueuePayloads["source-refresh"], { singletonKey: `${ctx.tenantId}:${sourceKey}` });
 }
 
 export async function saveProviderSecret(ctx: CommandContext, providerKey: string, name: string, value: string) {
