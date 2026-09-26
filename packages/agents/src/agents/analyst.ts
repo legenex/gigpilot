@@ -458,7 +458,13 @@ export async function runOpportunityAnalyse(payload: QueuePayloads["opportunity-
         ctx.summary = message;
 
         if (refine?.refine) {
-          await deps.queue.send(QUEUES.opportunityRefine, { tenantId, opportunityId: opp.id }, { singletonKey: opp.id });
+          // Priority = expected profit so the single heavy-model slot refines the most
+          // valuable candidate first (the owner sees a pursue decision sooner).
+          await deps.queue.send(
+            QUEUES.opportunityRefine,
+            { tenantId, opportunityId: opp.id },
+            { singletonKey: opp.id, priority: Math.max(0, Math.round(economics.grossProfitUsd)) },
+          );
         }
 
         if (score.recommendation === "pursue" && !settings.autonomy.requireOpportunityApproval) {

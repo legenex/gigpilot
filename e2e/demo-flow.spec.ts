@@ -8,7 +8,9 @@ import { APP_URL, WEB_URL, money, pollPage } from "./helpers";
 test("opportunity → proposal → job → QA fail → repair → approval → delivery", async ({ page }) => {
   // Production runs on local GX inference (one gx-code slot, ~40–60 s per heavy call);
   // web/automation jobs make ~10 heavy calls, so allow realistic wall-clock time.
-  test.setTimeout(25 * 60_000);
+  // Two-tier analysis also means a `pursue` only appears after the deep-analysis slot
+  // refines the top triage candidate, so the pre-job waits are generous too.
+  test.setTimeout(40 * 60_000);
 
   // 1–2. Logged-out website shows Log in / Sign up
   await page.goto(WEB_URL);
@@ -34,7 +36,7 @@ test("opportunity → proposal → job → QA fail → repair → approval → d
 
   // 7–8. Radar fills from the demo marketplace via the worker pipeline; find a pursue-worthy one
   const pursueRows = page.locator('[data-testid="radar-row"][data-recommendation="pursue"]:is([data-status="shortlisted"], [data-status="analysed"])');
-  await pollPage(page, `${APP_URL}/radar`, async () => (await pursueRows.count()) > 0, 180_000);
+  await pollPage(page, `${APP_URL}/radar`, async () => (await pursueRows.count()) > 0, 420_000);
   const oppId = await pursueRows.first().getAttribute("data-opportunity-id");
   await page.goto(`${APP_URL}/radar?view=all`);
   expect(await page.getByTestId("radar-row").count()).toBeGreaterThan(5);

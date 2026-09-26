@@ -781,7 +781,8 @@ describe("reliability repairs", () => {
       ids.push(await insertOpportunity(t, { ...AUTOMATION_BRIEF, title: `${AUTOMATION_BRIEF.title} #${i + 1}`, budgetMinUsd: budget, budgetMaxUsd: budget }));
     }
     for (const id of ids) await handlers["opportunity-analyse"]({ tenantId: t.tenantId, opportunityId: id }, deps);
-    const refines = deps.queue.take("opportunity-refine").map((x) => (x.payload as { opportunityId: string }).opportunityId);
+    const refineJobs = deps.queue.take("opportunity-refine");
+    const refines = refineJobs.map((x) => (x.payload as { opportunityId: string }).opportunityId);
     const events = await db.select().from(agentEvent).where(and(eq(agentEvent.tenantId, t.tenantId), eq(agentEvent.type, "opportunity.analysed")));
     // Triage never recommends pursuit: candidates are stored as "consider" and flagged for refinement.
     expect(events.every((e) => (e.data as Record<string, unknown>).recommendation !== "pursue")).toBe(true);
@@ -790,6 +791,11 @@ describe("reliability repairs", () => {
     expect(pursue.every((e) => (e.data as Record<string, unknown>).recommendation === "consider")).toBe(true);
     expect(refines).toHaveLength(2);
     expect(refines).toEqual(ids.slice(0, 2)); // the two highest-profit candidates
+    // Refine jobs carry a priority = expected profit so the single heavy-model slot
+    // refines the most valuable candidate first.
+    const priorities = refineJobs.map((x) => Number((x.options as { priority?: number } | undefined)?.priority ?? 0));
+    expect(priorities).toHaveLength(2);
+    expect(priorities[0]).toBeGreaterThan(priorities[1]);
     const skipped = pursue.filter((e) => (e.data as Record<string, unknown>).refineSkipped === "hourly cap");
     expect(skipped.map((e) => e.subjectId).sort()).toEqual(ids.slice(2).sort());
   });

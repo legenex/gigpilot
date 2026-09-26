@@ -20,6 +20,13 @@ delete from tenant where id in (
                     where m2.tenant_id = m.tenant_id and not (u2.$WHERE))
 );
 delete from "user" where $WHERE;
+-- Drop queued pg-boss work left behind by the removed workspaces so a deleted
+-- tenant's background jobs cannot hold the shared heavy-model slot.
+delete from pgboss.job j
+where j.state in ('created', 'retry', 'active')
+  and (j.data->>'tenantId') is not null
+  and (j.data->>'tenantId') ~ '^[0-9a-f-]{36}$'
+  and (j.data->>'tenantId')::uuid not in (select id from tenant);
 commit;
 SQL
 echo "deleted."
