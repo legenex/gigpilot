@@ -30,3 +30,13 @@
 - Marketing site finished and committed (a4c8d55). Agent system finished; fixed a submission deadlock,
   added budget-priority analysis and idle-workspace GX safeguards, un-ignored the storage module;
   committed 352701d. Remaining specialist: dashboard.
+- Independent engineering review: FAIL (4 confirmed dead-ends + spend/durability gaps). Independent
+  security review: FAIL (H1 operator-credential fallback; M1–M6). Two repair engineers fixed all
+  findings (+ orchestrator fixes: unpriced production → incomplete, configurable fit/confidence,
+  runtime paid-ceiling clamp, audit changed-paths). 363 tests pass (2 consecutive runs).
+- Ops: Caddy edge (Tailscale IP, trustworthy XFF) replaced socat; least-privilege DB role
+  gigpilot_app; least-privilege secret mounts. First deploy of the edge failed health (caddy file
+  capability vs cap_drop ALL) → automatic rollback worked → fixed with cap_add NET_BIND_SERVICE →
+  deployed 2e29627. Purged 9 test/audit accounts from prod.
+- Live GX pipeline verified on a real coding job: QA fail (failing retry test) → Recovery regenerate →
+  independent QA pass (gx-code) → delivery prepared.

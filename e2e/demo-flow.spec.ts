@@ -6,7 +6,9 @@ import { APP_URL, WEB_URL, money, pollPage } from "./helpers";
  * the real worker pipeline in demo/mock mode.
  */
 test("opportunity → proposal → job → QA fail → repair → approval → delivery", async ({ page }) => {
-  test.setTimeout(10 * 60_000);
+  // Production runs on local GX inference (one gx-code slot, ~40–60 s per heavy call);
+  // web/automation jobs make ~10 heavy calls, so allow realistic wall-clock time.
+  test.setTimeout(25 * 60_000);
 
   // 1–2. Logged-out website shows Log in / Sign up
   await page.goto(WEB_URL);
@@ -66,7 +68,7 @@ test("opportunity → proposal → job → QA fail → repair → approval → d
 
   // 13–18. Planner builds the DAG, agents execute, QA fails once, Recovery repairs, QA passes
   const status = page.getByTestId("job-status");
-  await pollPage(page, `${APP_URL}/jobs/${jobId}`, async () => (await status.getAttribute("data-status").catch(() => null)) === "awaiting_final_approval", 360_000, 4000);
+  await pollPage(page, `${APP_URL}/jobs/${jobId}`, async () => (await status.getAttribute("data-status").catch(() => null)) === "awaiting_final_approval", 18 * 60_000, 5000);
   expect(await page.getByTestId("dag-node").count()).toBeGreaterThan(3);
   expect(await page.locator('[data-testid="qa-review"][data-verdict="fail"]').count()).toBeGreaterThanOrEqual(1);
   expect(await page.locator('[data-testid="qa-review"][data-verdict="pass"]').count()).toBeGreaterThanOrEqual(1);
@@ -83,8 +85,10 @@ test("opportunity → proposal → job → QA fail → repair → approval → d
   expect((await pkg.body()).subarray(0, 2).toString()).toBe("PK"); // zip
 
   // 21. Expected vs actual cost
+  // Local GX inference is free, so a GX-produced job can legitimately cost $0 —
+  // assert both figures are real numbers and the ledger holds estimate AND actual rows.
   expect(money(await page.getByTestId("job-estimated-cost").textContent())).toBeGreaterThanOrEqual(0);
-  expect(money(await page.getByTestId("job-actual-cost").textContent())).toBeGreaterThan(0);
+  expect(money(await page.getByTestId("job-actual-cost").textContent())).toBeGreaterThanOrEqual(0);
   await page.goto(`${APP_URL}/costs`);
   expect(await page.locator('[data-testid="ledger-row"][data-kind="estimate"]').count()).toBeGreaterThan(0);
   expect(await page.locator('[data-testid="ledger-row"][data-kind="actual"]').count()).toBeGreaterThan(0);

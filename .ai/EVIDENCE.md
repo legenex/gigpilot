@@ -14,3 +14,11 @@
 | Worker against dev DB | PASS | 17 queues + schedules registered; /readyz 200; supervision 401/202/400/404 as designed; clean SIGTERM |
 | Marketing site Lighthouse | desktop 100/100/100/100; mobile 95/100/100/100 | FCP 0.3 s, LCP 0.7 s, CLS 0 (desktop) |
 | Marketing auth-state SSR | PASS | curl HTML logged-out → nav-login/nav-signup; logged-in → nav-dashboard; identical after hydration |
+| Full vitest after repairs | PASS 363 / 1 skipped ×2 | 34 files |
+| Live DB role separation | PASS | web/app/worker connect as gigpilot_app (non-superuser); DDL denied |
+| Edge proxy + CSP live | PASS | Tailscale 4710/4711 via Caddy; CSP + X-Frame-Options DENY on dashboard |
+| Deploy auto-rollback | PASS (exercised for real) | edge unhealthy → rolled back to previous image automatically |
+| Live GX QA-fail→repair→pass loop | PASS | job 4f28682d…: 2 QA fails, regenerate repair, 2 QA passes, delivery prepared |
+| E2E auth + smoke suites (live, post-repair) | PASS 9/9 | protected routes, API 401s, sign-up/logout/login, wrong password, SSR CTA both states, health, console-clean site, all pages render, no mobile overflow |
+| **E2E required demo flow §35 (live)** | **PASS** (13.4 min) | logged-out nav → signup → Go to Dashboard → radar → gates pass → approve pursuit → proposal → approve → award → job → DAG → QA fail → repair → QA pass → final approval → zip download → ledger estimate+actual → agents/events history |
+| Independent product review | FAIL → repairs in progress | hollow verification, triage-only pursue, unlabelled sample data, duplicate batches, inert allocation |

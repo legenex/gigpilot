@@ -208,7 +208,11 @@ export class GxProvider implements IntelligenceProvider {
       else if (level === "json_object") body.response_format = { type: "json_object" };
 
       const heavy = p.model !== setting("GX_MODEL_FAST");
-      const waitOpts = { priority: p.priority ?? 2, timeoutMs: setting("GX_ACQUIRE_TIMEOUT_MS") };
+      // Owner-facing production/QA/recovery work (priority 2) waits longer for the shared
+      // slot than background refinement: falling back to mock there would only trigger a
+      // needless "produced by mock" escalation on live workspaces.
+      const priority = p.priority ?? 2;
+      const waitOpts = { priority, timeoutMs: setting("GX_ACQUIRE_TIMEOUT_MS") * (priority >= 2 ? 5 : 1) };
       const slotError = (err: unknown, what: string) =>
         new ProviderError("gx", "timeout", err instanceof SemaphoreTimeoutError ? `${err.message} (${what}) — GX is saturated` : `aborted while waiting for ${what}`);
       const releaseHeavy = heavy
