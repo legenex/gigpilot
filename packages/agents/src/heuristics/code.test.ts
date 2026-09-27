@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { generateAutomationArtifact, generateWebArtifact } from "./code";
+import { generateAutomationArtifact, generateWebArtifact, scaffoldRequestedFeatures } from "./code";
 import { detectRequestedFeatures, featureCoverage } from "./features";
 
 const MVP_BRIEF =
@@ -28,5 +28,17 @@ describe("deterministic code artifacts attempt every requested feature", () => {
     const art = generateWebArtifact({ title: "Marketing site", brief: MVP_BRIEF, clientName: "Beacon Books", defect: null, repairHint: null });
     const cms = art.files.filter((f) => f.path === "lib/cms.ts");
     expect(cms).toHaveLength(1);
+  });
+
+  it("adds a non-colliding scaffold when the canonical path is taken without evidence", () => {
+    const files = [
+      { path: "lib/requests.ts", content: "export const placeholder = 1; // model stub with no feature evidence" },
+      { path: "README.md", content: "## Deploy\nDeployment guide with setup steps." },
+    ];
+    scaffoldRequestedFeatures("web-app-builds", MVP_BRIEF, files);
+    const coverage = featureCoverage(detectRequestedFeatures(MVP_BRIEF, "web-app-builds"), files);
+    expect(coverage.missing.map((f) => f.label)).toEqual([]);
+    expect(files.some((f) => f.path === "lib/requests.ts")).toBe(true);
+    expect(files.some((f) => f.path === "lib/requests.gigpilot.ts")).toBe(true);
   });
 });

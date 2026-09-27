@@ -454,8 +454,21 @@ async function executeCode(ctx: RunContext, j: JobRow, step: StepRow, _all: Step
   // generated and un-executed, and never overwrite a real file). A LIVE workspace is never
   // supplemented: a genuinely missing feature must still surface as a QA `missing_feature`.
   const [tenantRow] = await getDb().select({ mode: tenant.mode }).from(tenant).where(eq(tenant.id, j.tenantId)).limit(1);
-  if (tenantRow?.mode !== "live") {
+  const demoWorkspace = tenantRow?.mode !== "live";
+  if (demoWorkspace) {
+    // Demo workspaces build on the deterministic skeleton (README, source, tests) so the
+    // workflow is demonstrable and repeatable; the model's files overlay it where present.
+    // Live workspaces use the model's output verbatim.
+    const byPath = new Map<string, { path: string; content: string }>();
+    for (const f of deterministic.files) byPath.set(f.path, f);
+    for (const f of art.files) byPath.set(f.path, f);
+    art.files = [...byPath.values()];
     scaffoldRequestedFeatures(j.serviceFamily === "web-app-builds" ? "web-app-builds" : "ai-automation", codeBrief, art.files);
+    // The demo must show exactly one labelled defect and then a clean repair. A model's own
+    // self-reported failures (neither executed nor verifiable here) would add spurious repair
+    // cycles, so in demo workspaces the deterministic report — which carries only the
+    // injected defect — is authoritative. Live workspaces keep the model's report.
+    art.testReport = deterministic.testReport;
   }
   if (defect === "failing_test" && art.testReport.failed === 0 && art.testReport.tests.length > 0) {
     const t = art.testReport.tests[art.testReport.tests.length - 1]!;
