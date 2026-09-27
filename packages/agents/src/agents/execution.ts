@@ -2,7 +2,7 @@ import path from "node:path";
 import { strToU8, zipSync } from "fflate";
 import { z } from "zod";
 import { AGENTS, InvalidTransitionError, QUEUES, type AgentKey, type Capability, type CreativeRequest, type IntelligenceTask, type QueuePayloads } from "@gigpilot/contracts";
-import { and, asset, client, ConcurrentTransitionError, desc, emitEvent, eq, getDb, inArray, job, opportunityAnalysis, transition, workflowStep, type TransitionInput } from "@gigpilot/db";
+import { and, asset, client, ConcurrentTransitionError, desc, emitEvent, eq, getDb, inArray, job, opportunityAnalysis, tenant, transition, workflowStep, type TransitionInput } from "@gigpilot/db";
 import { isProviderError, neutraliseDelimiters, wrapUntrusted } from "@gigpilot/providers";
 import { storageOf, type AgentDeps } from "../deps";
 import { codeArtifactSchema, generateAutomationArtifact, generateWebArtifact, scaffoldRequestedFeatures, type CodeArtifact } from "../heuristics/code";
@@ -449,10 +449,14 @@ async function executeCode(ctx: RunContext, j: JobRow, step: StepRow, _all: Step
     { avoidFamilies: repair?.avoidFamilies },
   );
   const art: CodeArtifact = res.data ?? deterministic;
-  // Whatever produced the artifact (model or deterministic generator), make sure every
-  // feature the brief names is at least present in the delivered source. Scaffolds are
-  // clearly marked as generated and un-executed; real files are never overwritten.
-  scaffoldRequestedFeatures(j.serviceFamily === "web-app-builds" ? "web-app-builds" : "ai-automation", codeBrief, art.files);
+  // In DEMO workspaces only, make sure every feature the brief names is present in the
+  // delivered source even when the model's output varied (feature scaffolds are marked as
+  // generated and un-executed, and never overwrite a real file). A LIVE workspace is never
+  // supplemented: a genuinely missing feature must still surface as a QA `missing_feature`.
+  const [tenantRow] = await getDb().select({ mode: tenant.mode }).from(tenant).where(eq(tenant.id, j.tenantId)).limit(1);
+  if (tenantRow?.mode !== "live") {
+    scaffoldRequestedFeatures(j.serviceFamily === "web-app-builds" ? "web-app-builds" : "ai-automation", codeBrief, art.files);
+  }
   if (defect === "failing_test" && art.testReport.failed === 0 && art.testReport.tests.length > 0) {
     const t = art.testReport.tests[art.testReport.tests.length - 1]!;
     t.status = "failed";
