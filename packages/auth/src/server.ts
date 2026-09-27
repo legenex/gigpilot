@@ -3,7 +3,7 @@ import { APIError, createAuthMiddleware } from "better-auth/api";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { nextCookies, toNextJsHandler } from "better-auth/next-js";
 import { env } from "@gigpilot/config/env";
-import { bootstrapTenantForUser, getDb, getMembership, inArray, parseOperatorEmails, schema, sql, user as userTable } from "@gigpilot/db";
+import { bootstrapTenantForUser, eq, getDb, getMembership, inArray, parseOperatorEmails, schema, sql, user as userTable } from "@gigpilot/db";
 import { onWorkspaceCreated } from "./hooks";
 import { isEmailAllowed, signupPolicyWarnings, splitList, type SignupPolicy } from "./policy";
 import { clearSigninFailures, lockRemainingMs, readBackoff, recordSigninFailure } from "./signin-backoff";
@@ -56,6 +56,51 @@ function emailFromBody(body: unknown): string | null {
   return typeof v === "string" && v.trim() ? v.trim().slice(0, 320) : null;
 }
 
+// ---------------------------------------------------------------------------
+// Forced first-login password change (operator bootstrap)
+//
+// V1 has no email transport, so single-use reset tokens minted through
+// Better Auth's /request-password-reset are captured in-process by the
+// sendResetPassword hook instead of being emailed: a token never leaves the
+// server, is consumed immediately by resetUserPassword(), and expires in the
+// verification table after resetPasswordTokenExpiresIn (default 1 h). The
+// public endpoint stays honest — it mints a token nobody but the server can
+// read and returns the same generic response for every address.
+// ---------------------------------------------------------------------------
+
+interface CapturedResetToken {
+  token: string;
+  expiresAt: number;
+}
+
+const capturedResetTokens = new Map<string, CapturedResetToken>();
+
+/** How long a captured reset token stays usable after it was minted. */
+const CAPTURED_TOKEN_TTL_MS = 60_000;
+
+/**
+ * Sets a user's password through Better Auth's own reset-token flow (hashing,
+ * account update and token verification are all Better Auth's; no password
+ * hash is ever constructed by GigPilot). Used by the operator bootstrap and by
+ * completeForcedPasswordChange — the two flows that legitimately change a
+ * password without knowing the current one.
+ */
+export async function resetUserPassword(email: string, newPassword: string): Promise<void> {
+  await getAuth().api.requestPasswordReset({ body: { email } });
+  const key = email.trim().toLowerCase();
+  const deadline = Date.now() + 5_000; // the hook fires within the API call
+  let captured: CapturedResetToken | undefined;
+  while (!captured && Date.now() < deadline) {
+    captured = capturedResetTokens.get(key);
+    if (!captured) await new Promise((r) => setTimeout(r, 25));
+  }
+  capturedResetTokens.delete(key);
+  if (!captured || captured.expiresAt <= Date.now()) {
+    throw new Error("Could not start the password change. Try again.");
+  }
+  await getAuth().api.resetPassword({ body: { newPassword, token: captured.token } });
+}
+
 function createAuth() {
   const e = env();
   const secure = e.APP_URL.startsWith("https://");
@@ -84,6 +129,12 @@ function createAuth() {
       requireEmailVerification: e.AUTH_REQUIRE_EMAIL_VERIFICATION,
       minPasswordLength: 10,
       maxPasswordLength: 128,
+      // No email transport exists in V1: tokens minted by /request-password-reset
+      // are captured in-process (never logged, never sent to a client) and
+      // consumed immediately by resetUserPassword(). See the note above.
+      sendResetPassword: async ({ user: u, token }) => {
+        capturedResetTokens.set(u.email.trim().toLowerCase(), { token, expiresAt: Date.now() + CAPTURED_TOKEN_TTL_MS });
+      },
     },
     trustedOrigins,
     session: {
@@ -199,6 +250,8 @@ export interface SessionContext {
   tenantName: string;
   tenantMode: "demo" | "live";
   role: "owner" | "admin" | "member";
+  /** True until the user chose their own permanent password (operator bootstrap). */
+  mustChangePassword: boolean;
 }
 
 /**
@@ -215,6 +268,11 @@ export async function getSessionContext(headers: Headers): Promise<SessionContex
     m = await getMembership(db, session.user.id);
     if (!m) return null;
   }
+  const u = await db
+    .select({ mustChangePassword: userTable.mustChangePassword })
+    .from(userTable)
+    .where(eq(userTable.id, session.user.id))
+    .limit(1);
   return {
     user: { id: session.user.id, name: session.user.name, email: session.user.email, image: session.user.image },
     sessionId: session.session.id,
@@ -222,6 +280,7 @@ export async function getSessionContext(headers: Headers): Promise<SessionContex
     tenantName: m.tenantName,
     tenantMode: m.tenantMode,
     role: m.role,
+    mustChangePassword: u[0]?.mustChangePassword ?? false,
   };
 }
 
@@ -233,4 +292,29 @@ export async function isSignedIn(headers: Headers): Promise<{ signedIn: boolean;
   } catch {
     return { signedIn: false };
   }
+}
+
+/** Raised when the forced password change cannot proceed (session/flag state). */
+export class ForcedPasswordError extends Error {}
+
+/**
+ * Completes the forced first-login password change for the session user:
+ * the new password is set through Better Auth's own flow (resetUserPassword),
+ * all OTHER sessions are revoked (the current session stays signed in), and
+ * mustChangePassword is cleared so the dashboard unlocks. No password hash is
+ * constructed by GigPilot; Better Auth hashes and stores the credential.
+ */
+export async function completeForcedPasswordChange(headers: Headers, newPassword: string): Promise<void> {
+  const session = await getAuth().api.getSession({ headers });
+  if (!session) throw new ForcedPasswordError("Your session expired. Log in again and choose your password.");
+  const db = getDb();
+  const rows = await db
+    .select({ mustChangePassword: userTable.mustChangePassword })
+    .from(userTable)
+    .where(eq(userTable.id, session.user.id))
+    .limit(1);
+  if (!rows[0]?.mustChangePassword) throw new ForcedPasswordError("No password change is required for this account.");
+  await resetUserPassword(session.user.email, newPassword);
+  await getAuth().api.revokeOtherSessions({ headers });
+  await db.update(userTable).set({ mustChangePassword: false }).where(eq(userTable.id, session.user.id));
 }

@@ -23,6 +23,7 @@ function contentDisposition(kind: "inline" | "attachment", filename: string): st
 export async function GET(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const ctx = await getSessionContext(request.headers);
   if (!ctx) return new Response("Unauthorized", { status: 401 });
+  if (ctx.mustChangePassword) return new Response("Choose your password first", { status: 403 });
   if (!rateLimit(`asset:${ctx.user.id}`, 600, 60_000).ok) return new Response("Too many requests", { status: 429 });
   const { id } = await params;
   if (!UUID.test(id)) return new Response("Not found", { status: 404 });

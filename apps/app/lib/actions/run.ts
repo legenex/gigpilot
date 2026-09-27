@@ -47,6 +47,7 @@ export async function runAction<T>(
 ): Promise<ActionResult<T>> {
   const session = await getSessionContext(await headers());
   if (!session) return { ok: false, error: "Your session expired. Sign in again." };
+  if (session.mustChangePassword) return { ok: false, error: "Choose your password first — then the workspace unlocks." };
   const rl = rateLimit(`action:${session.user.id}:${name}`, opts.limit ?? 30, opts.windowMs ?? 60_000);
   if (!rl.ok) return { ok: false, error: `Too many requests — try again in ${Math.ceil(rl.retryAfterMs / 1000)}s.` };
   const ctx: CommandContext = { tenantId: session.tenantId, userId: session.user.id, role: session.role };

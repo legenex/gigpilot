@@ -10,13 +10,17 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "lint": "eslint src"
+    "lint": "eslint src",
+    "ops:operator-account": "tsx src/bin/operator-account.ts"
   },
   "dependencies": {
     "@gigpilot/config": "workspace:*",
     "@gigpilot/contracts": "workspace:*",
     "@gigpilot/db": "workspace:*",
     "better-auth": "1.7.6"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.0"
   },
   "peerDependencies": {
     "next": "^16.3.6",

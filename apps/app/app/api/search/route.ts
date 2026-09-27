@@ -9,6 +9,7 @@ export const dynamic = "force-dynamic";
 export async function GET(request: Request) {
   const ctx = await getSessionContext(request.headers);
   if (!ctx) return Response.json({ hits: [] }, { status: 401 });
+  if (ctx.mustChangePassword) return Response.json({ hits: [] }, { status: 403 });
   if (!rateLimit(`search:${ctx.user.id}`, 120, 60_000).ok) return Response.json({ hits: [] }, { status: 429 });
   const q = (new URL(request.url).searchParams.get("q") ?? "").trim().slice(0, 100);
   if (q.length < 2) return Response.json({ hits: [] });

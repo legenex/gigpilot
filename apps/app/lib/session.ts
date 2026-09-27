@@ -12,5 +12,7 @@ export const getSession = cache(async (): Promise<SessionContext | null> => {
 export async function requireSession(): Promise<SessionContext> {
   const ctx = await getSession();
   if (!ctx) redirect("/login");
+  // Operator bootstrap: no dashboard until a permanent password is chosen.
+  if (ctx.mustChangePassword) redirect("/set-password");
   return ctx;
 }

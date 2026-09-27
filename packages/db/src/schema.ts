@@ -46,6 +46,12 @@ export const user = pgTable("user", {
   email: text("email").notNull().unique(),
   emailVerified: boolean("email_verified").notNull().default(false),
   image: text("image"),
+  /**
+   * True until the user has chosen their own permanent password (operator
+   * bootstrap). While true, every dashboard route redirects to /set-password
+   * and app server actions are refused. Not a secret — just a boolean flag.
+   */
+  mustChangePassword: boolean("must_change_password").notNull().default(false),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
 });

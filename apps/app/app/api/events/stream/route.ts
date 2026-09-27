@@ -32,6 +32,7 @@ const PAGE = 200;
 export async function GET(request: Request) {
   const ctx = await getSessionContext(request.headers);
   if (!ctx) return new Response("Unauthorized", { status: 401 });
+  if (ctx.mustChangePassword) return new Response("Choose your password first", { status: 403 });
   const rl = rateLimit(`sse:${ctx.user.id}`, 30, 60_000);
   if (!rl.ok) return new Response("Too many connections", { status: 429, headers: { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) } });
   if (request.signal.aborted) return new Response(null, { status: 499 });
