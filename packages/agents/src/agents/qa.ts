@@ -585,10 +585,17 @@ export async function runQaStep(ctx: RunContext, j: JobRow, qaStep: StepRow, all
         : typeof outputOf(s).markdown === "string"
           ? truncate(outputOf(s).markdown as string, 1500)
           : JSON.stringify(outputOf(s).testReport ?? outputOf(s).items ?? {}).slice(0, 1500);
-    const llm = await callIntelligence(
-      ctx,
-      {
-        task,
+    // Demo workspaces: code/test artifacts are deterministic mock stand-ins, so a model
+    // review would only report the stand-ins as incomplete and loop the repair cycle.
+    // Review them deterministically (labelled deterministic_only) and keep the model
+    // review for live workspaces, where a real implementation is expected.
+    const llm =
+      !live && (s.kind === "code" || s.kind === "test")
+        ? { family: "mock" as const, model: "deterministic", data: baseline }
+        : await callIntelligence(
+            ctx,
+            {
+              task,
         schema: qaVerdictSchema,
         schemaName: "qa_verdict",
         maxOutputTokens: 900,
