@@ -9,8 +9,10 @@ test("opportunity → proposal → job → QA fail → repair → approval → d
   // Production runs on local GX inference (one gx-code slot, ~40–60 s per heavy call);
   // web/automation jobs make ~10 heavy calls, so allow realistic wall-clock time.
   // Two-tier analysis also means a `pursue` only appears after the deep-analysis slot
-  // refines the top triage candidate, so the pre-job waits are generous too.
-  test.setTimeout(40 * 60_000);
+  // refines the top triage candidate, so the pre-job waits are generous too. Run this
+  // suite on a stack with no other throwaway workspaces queued (`pnpm e2e:cleanup`
+  // first) — they share the single heavy-model slot and would slow the job.
+  test.setTimeout(45 * 60_000);
 
   // 1–2. Logged-out website shows Log in / Sign up
   await page.goto(WEB_URL);
@@ -70,7 +72,7 @@ test("opportunity → proposal → job → QA fail → repair → approval → d
 
   // 13–18. Planner builds the DAG, agents execute, QA fails once, Recovery repairs, QA passes
   const status = page.getByTestId("job-status");
-  await pollPage(page, `${APP_URL}/jobs/${jobId}`, async () => (await status.getAttribute("data-status").catch(() => null)) === "awaiting_final_approval", 18 * 60_000, 5000);
+  await pollPage(page, `${APP_URL}/jobs/${jobId}`, async () => (await status.getAttribute("data-status").catch(() => null)) === "awaiting_final_approval", 28 * 60_000, 5000);
   expect(await page.getByTestId("dag-node").count()).toBeGreaterThan(3);
   expect(await page.locator('[data-testid="qa-review"][data-verdict="fail"]').count()).toBeGreaterThanOrEqual(1);
   expect(await page.locator('[data-testid="qa-review"][data-verdict="pass"]').count()).toBeGreaterThanOrEqual(1);
