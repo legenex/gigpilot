@@ -26,3 +26,17 @@
 | Restart: PostgreSQL restart under load | PASS | app + worker reconnected automatically within 10 s |
 | Restart: full stack `compose restart` | PASS | all 5 services healthy in ~30 s; Tailscale edge 200; auth+smoke E2E 9/9 after restart |
 | Reboot persistence prerequisites | VERIFIED (reboot not executed — shared host) | linger=yes; containers `restart: unless-stopped` incl. edge (retries until Tailscale IP exists); backup timer enabled; docker enabled |
+
+## 2026-09-27 (finish run, deployed 1435fe8)
+| Check | Result | Detail |
+|---|---|---|
+| Typecheck / lint / tests | PASS | 402 passed, 1 skipped; 38 files |
+| Production builds | PASS | apps/web, apps/app, worker |
+| E2E auth + smoke | PASS 9/9 | protected routes, SSR CTA, health, all pages render, no mobile overflow |
+| E2E required demo flow (live) | PASS (19.6 min) | signup → radar → pursue → proposal → award → job → QA fail → repair → QA pass → approval → delivery zip → ledger → audit |
+| Backup | PASS | pre-deploy dumps verified with `pg_restore --list` |
+| Restore rehearsal | PASS (non-destructive) | restored into a disposable DB: 36 tables, 1799 pg-boss jobs, runtime role grants reapplied, then dropped |
+| Worker restart | PASS | `docker restart` → ready in ~4 s; no stranded work |
+| Watchdog + timers | PASS | gigpilot-backup.timer, gigpilot-watchdog.timer active; watchdog silent when healthy |
+| Tailscale | PASS | 4710 site 200; 4711 dashboard 307→login, /api/health 200 |
+| Deployed version | PASS | supervision status version = 1435fe80568b |

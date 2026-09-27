@@ -58,3 +58,11 @@
 - Deployed cdd7edd; required demo flow E2E PASSES on live (12.3 min: 3 QA fails, 3 repairs, delivery,
   ledger, audit history). Restore rehearsal + watchdog/timers verified.
 - Mobile sample-data notice wraps correctly; committed.
+- Deployed 9b716cb, 1435fe8: gated feature scaffolding to demo only; made demo code artifacts build
+  on the deterministic skeleton (one labelled defect → clean repair); demo code/test QA is
+  deterministic_only (labelled), live keeps model review.
+- FINAL: 1435fe8 deployed and healthy. typecheck + lint + 402 tests + web/app/worker builds PASS.
+  auth+smoke 9/9; required demo flow E2E PASS (19.6 min, 1 repair, delivered, zip + ledger + audit).
+  Backup verified; non-destructive restore rehearsal PASS (36 tables, pg-boss restored, runtime role
+  grants reapplied); worker restart reclaims work ~4 s; watchdog + timers active; Tailscale 4710/4711
+  200; version endpoint = deployed SHA. Pushed to legenex/gigpilot.
