@@ -65,21 +65,24 @@ async function main(): Promise<void> {
     created = true;
   }
 
-  // Workspace: use the existing one, or bootstrap (and name) a live one.
+  // Workspace: use the existing one, or bootstrap one (then name it) for a user
+  // the sign-up hook could not have bootstrapped (pre-existing accounts).
   let m = await getMembership(db, userId);
   if (!m) {
-    const boot = await bootstrapTenantForUser(db, { userId, name: input.name ?? "Operator", email, mode: "live" });
-    if (created) {
-      await db
-        .update(tenant)
-        .set({ name: input.workspaceName ?? "GigPilot" })
-        .where(eq(tenant.id, boot.tenantId));
-    }
+    await bootstrapTenantForUser(db, { userId, name: input.name ?? "Operator", email, mode: "live" });
     m = await getMembership(db, userId);
   }
   if (!m) fail("Workspace bootstrap failed.");
   if (m.role !== "owner") {
     await db.update(membership).set({ role: "owner" }).where(eq(membership.userId, userId));
+  }
+  if (created) {
+    // The sign-up hook names the workspace after the user; the operator
+    // workspace gets its proper name at creation time only.
+    await db
+      .update(tenant)
+      .set({ name: input.workspaceName ?? "GigPilot" })
+      .where(eq(tenant.id, m.tenantId));
   }
 
   // Force the first-login password change and revoke every live session.
@@ -91,8 +94,10 @@ async function main(): Promise<void> {
     actor: { type: "system", id: `operator-account-${randomUUID().slice(0, 8)}` },
     action: "user.password_bootstrapped",
     subjectType: "user",
-    subjectId: userId,
-    data: { created, mustChangePassword: true, sessionsRevoked: revoked.length, role: "owner" },
+    // subject_id is a uuid column while Better Auth user ids are text, so the
+    // user id travels in data instead.
+    subjectId: null,
+    data: { userId, created, mustChangePassword: true, sessionsRevoked: revoked.length, role: "owner" },
   });
 
   const out = await getMembership(db, userId);
