@@ -102,3 +102,7 @@
 - D7 registration deferral superseded (D19). Compose stack is down since
   2026-09-27 (watchdog alerting; db not running; backups failing). AI OS
   working-copy bind still needs owner portal `allowed_roots` (see BLOCKERS).
+- Hermes lifecycle smoke: Dexter `t_5912988a` complete (SHA 3b54410 on
+  `gigpilot/t_5912988a`); Bugsy `t_bbeef94f` PASS; Critic `t_82283437` PASS;
+  Bossman receipt comment on parent. Project IDs converged to `p_ba798c35`
+  on default/bossman/archie/dexter/bugsy/critic; `gigpilot-2` archived.

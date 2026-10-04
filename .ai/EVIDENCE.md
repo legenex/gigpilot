@@ -67,3 +67,6 @@
 | Check | Result | Detail |
 |---|---|---|
 | GX10 executor worktree | PASS | task t_5912988a; host gx10-01; lane gigpilot |
+| Bugsy QA t_bbeef94f | PASS | assignee bugsy; GX10 worktree; verified 3b54410 docs-only EVIDENCE row |
+| Critic review t_82283437 | PASS | assignee critic; claimed from review; no product/secrets/Docker changes |
+| Bossman receipt | PASS | comment on t_5912988a after Dexter+Bugsy+Critic |

@@ -17,13 +17,11 @@ redirects to `/set-password`). The one-time bootstrap password was handed to the
 and appears nowhere in the repo. External credentials (Factory, Grok, Kie, Higgsfield, Upwork,
 Freelancer) remain "needs configuration" and are documented in BLOCKERS.md — not blockers.
 
-**Next action:** restore the gx10-01 compose stack (containers have been down
-since 2026-09-27; watchdog alerts only). Owner first login still pending at
-http://100.105.214.61:4711/login. AgentOS/Buzz registration is in progress
-(D7 superseded). Optional external follow-ups: provider credentials, public
-VPS (`ops/vps/`). AI OS working-copy registration still needs an owner portal
-session to add `/home/legenex/Documents/Projects` to gx10-01 `allowed_roots`
-and approve discovery of this checkout.
+**Next action:** (1) Nick portal-registers the GX10-01 working copy — see
+BLOCKERS. (2) Restore compose when ≥6 GiB RAM is free. Owner first login still
+pending at http://100.105.214.61:4711/login. AgentOS/Buzz/Hermes surfaces exist
+(`#gigpilot`, board `gigpilot`, project `p_ba798c35`, gx10 lane). Optional:
+provider credentials, public VPS.
 
 ## Completion contract (from the build brief)
 Repository clean + pushed, no secrets · premium responsive animated site with correct Log in/Sign up ↔
