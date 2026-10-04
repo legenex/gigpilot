@@ -62,3 +62,8 @@
 | GX product models | PASS | LiteLLM with gigpilot key: `gx-mini`, `gx-code`, `gx-auto` |
 | Buzz `#gigpilot` | PASS | created `b79f3679-2bf2-4667-b53a-d386f7370e23`; members verified |
 | Compose stack | FAIL | no gigpilot containers; watchdog ALERT since 2026-09-27; backup FAILED db not running |
+
+## AgentOS GX10 executor smoke (2026-10-04)
+| Check | Result | Detail |
+|---|---|---|
+| GX10 executor worktree | PASS | task t_5912988a; host gx10-01; lane gigpilot |
