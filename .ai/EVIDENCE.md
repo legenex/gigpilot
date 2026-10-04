@@ -40,3 +40,8 @@
 | Watchdog + timers | PASS | gigpilot-backup.timer, gigpilot-watchdog.timer active; watchdog silent when healthy |
 | Tailscale | PASS | 4710 site 200; 4711 dashboard 307→login, /api/health 200 |
 | Deployed version | PASS | supervision status version = 1435fe80568b |
+
+## AgentOS GX10 executor smoke (2026-10-04)
+| Check | Result | Detail |
+|---|---|---|
+| GX10 executor worktree | PASS | task t_5912988a; host gx10-01; lane gigpilot |
