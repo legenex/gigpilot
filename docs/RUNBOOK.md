@@ -1,6 +1,8 @@
 # GigPilot runbook
 
-All commands run on gx10-01 from the repo root (`~/Documents/Projects/GigSmith`).
+All commands run on gx10-01 from the source checkout
+(`/home/legenex/Documents/Projects/GigPilot`). Runtime data is
+`/srv/projects/gigpilot` — not a git working copy.
 `DC` below is shorthand for:
 
 ```bash
@@ -128,9 +130,14 @@ Per-job spend limits, attempt limits and repair limits still apply.
 
 ## AgentOS
 
-GigPilot exposes a pull-only supervision API on `127.0.0.1:4712` and writes
-`/srv/projects/gigpilot/status/agentos.json` every minute. A ready-to-import AgentOS project
-descriptor lives in `ops/agentos/` (not registered — registration starts Hermes Kanban work).
+GigPilot is a registered AgentOS software project. Hermes VPS is the control
+plane; autonomous software work runs on gx10-01 via `execution/registry.yaml`
+lane `gx10` at `/home/legenex/Documents/Projects/GigPilot`. Buzz channel
+`#gigpilot` (`b79f3679-2bf2-4667-b53a-d386f7370e23`). Kanban board `gigpilot`.
+
+The product still exposes a pull-only supervision API on `127.0.0.1:4712` and
+writes `/srv/projects/gigpilot/status/agentos.json` every minute. Descriptor:
+`ops/agentos/`.
 
 ## Troubleshooting
 

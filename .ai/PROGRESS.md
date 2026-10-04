@@ -66,3 +66,39 @@
   Backup verified; non-destructive restore rehearsal PASS (36 tables, pg-boss restored, runtime role
   grants reapplied); worker restart reclaims work ~4 s; watchdog + timers active; Tailscale 4710/4711
   200; version endpoint = deployed SHA. Pushed to legenex/gigpilot.
+
+## 2026-09-27 (operator handover)
+- Forced a password choice on the operator's first login (507e4ba): `must_change_password` flag
+  (additive migration 0003), `/set-password` page, 403-gated server actions and data APIs, change
+  run through Better Auth's own in-process reset-token flow (no email transport, tokens never
+  leave the server), other sessions revoked, flag cleared on success. Operator bootstrap script in
+  packages/auth (password read from stdin, never logged or committed).
+- Named the operator workspace at bootstrap and fixed its audit row (cf6ae67): rename applies
+  whenever the run created the account; audit row keeps the user id in `data` (audit subject_id is
+  uuid, Better Auth user ids are text).
+- Bootstrapped the operator account: owner of the live "GigPilot" workspace, recognized via
+  `OPERATOR_EMAILS` (added to an empty list), flag armed, 0 sessions, audit rows recorded. The
+  one-time bootstrap password was delivered to the owner out-of-band; full-history grep + gitleaks
+  clean — it appears nowhere in the repo, env files, docs, logs or image layers.
+- Deployed cf6ae67 and verified: worker ready at schema 0003_must_change_password; an 11-step
+  Playwright live first-login check passed (forced change, gated routes, 403 APIs, new password
+  works, old rejected, account restored to bootstrap state afterwards without logging in);
+  405 tests / 1 skipped; typecheck + lint for all touched packages; dashboard production build.
+  Pushed; local HEAD = origin/main = deployed SHA.
+- Post-ship health check (~15:53 SAST): host rebooted at 15:51 — all 5 containers self-recovered
+  healthy via `unless-stopped` + linger, /login 200, app health OK (db 1 ms), worker readyz OK
+  with fresh schedules. Real reboot persistence confirmed (previously only verified by
+  prerequisites).
+
+## 2026-10-04 (AI OS / AgentOS / Buzz integration)
+- Verified source checkout `/home/legenex/Documents/Projects/GigPilot` on `main`
+  at `cf6ae67`; runtime data remains `/srv/projects/gigpilot`. Retired path
+  `GigSmith` is not the coding tree.
+- `ai mcp` on gx10-01 works with the machine token (tools: use_context,
+  search_context, read_context, create_project). Canonical priorities query
+  returned `company/CURRENT_PRIORITIES.md` (GigPilot is NOW).
+- Created Buzz `#gigpilot` (`b79f3679-2bf2-4667-b53a-d386f7370e23`); members
+  Bossman+Nick owners, Archie/Dexter/Bugsy/Critic members.
+- D7 registration deferral superseded (D19). Compose stack is down since
+  2026-09-27 (watchdog alerting; db not running; backups failing). AI OS
+  working-copy bind still needs owner portal `allowed_roots` (see BLOCKERS).

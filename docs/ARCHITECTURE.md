@@ -19,6 +19,10 @@
                     │   └─ Storage (filesystem volume; S3/R2 adapter)                   │
                     │ AgentOS: pull-only supervision API + status file                  │
                     └────────────────────────────────────────────────────────────────────┘
+
+Source checkout (git): `/home/legenex/Documents/Projects/GigPilot`.
+Runtime data (not git): `/srv/projects/gigpilot`. Hermes VPS is AgentOS
+control plane only — software execution is the gx10-01 lane.
 ```
 
 - **One Postgres** holds application data, Better Auth tables, and the pg-boss queue

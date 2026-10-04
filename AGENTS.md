@@ -10,13 +10,38 @@ This file is the canonical engineering contract. `CLAUDE.md` only points here.
 Live project state lives in `.ai/` (PLAN, BACKLOG, PROGRESS, DECISIONS,
 BLOCKERS, EVIDENCE, HANDOFF) — read `.ai/HANDOFF.md` first.
 
+## Shared Legenex context
+
+GigPilot does **not** carry a private copy of company-wide Legenex knowledge.
+Shared context (priorities, infrastructure, cross-project decisions) lives in
+`legenex/ai-context` and is reached through the machine-level AI OS bridge:
+
+```bash
+ai mcp          # stdio MCP for headless / GX10 coding agents
+ai ask "..."    # same knowledge, no MCP client required
+```
+
+Portal: `https://ai.legenex.com`. Remote MCP: `https://ai.legenex.com/mcp`.
+Keep project-specific requirements in this repository. Do not clone AI OS
+guides or the global knowledge base into GigPilot.
+
+## Checkouts on gx10-01
+
+| Role | Path | Notes |
+|---|---|---|
+| Source working copy | `/home/legenex/Documents/Projects/GigPilot` | Git top-level; `origin` is `legenex/gigpilot` |
+| Runtime data | `/srv/projects/gigpilot` | secrets, config, backups, releases, status — **not** the git checkout |
+
+Do not treat `/srv/projects/gigpilot` as the coding tree. Do not use the
+retired directory name `GigSmith`.
+
 ## Autonomy
 
 This project inherits the standing authority of the Legenex AgentOS policy:
 safe, reversible, internal work proceeds without asking. Do not ask for
-approval for libraries, refactors, schema migrations (this is a young local
-project), ports inside the GigPilot range, tests, restarts of GigPilot
-services, commits or pushes to `legenex/gigpilot`.
+approval for libraries, refactors, schema migrations, ports inside the
+GigPilot range, tests, restarts of GigPilot services, commits or pushes to
+`legenex/gigpilot`.
 
 **Human-only gates** (never automate around them): OAuth/MFA logins,
 entering or rotating real credentials, enabling real-money spend (raising
@@ -96,10 +121,21 @@ Local dev uses the gitignored root `.env` (generated from
 
 Only touch Docker resources prefixed `gigpilot`. Never prune, never restart
 the Docker daemon, never bind `0.0.0.0`. Containers publish on `127.0.0.1`;
-Tailscale exposure is the `gigpilot-ts-proxy` user unit. GigPilot uses only
-ports 4710–4729. Do not use `gx-max`. Runtime data lives in
+Tailscale exposure is the Caddy `edge` service (binds the Tailscale IP only).
+GigPilot uses only ports 4710–4729. Do not use `gx-max`. Runtime data lives in
 `/srv/projects/gigpilot` and external volumes `gigpilot_pgdata`,
 `gigpilot_storage`.
+
+## AgentOS / Hermes / Buzz
+
+GigPilot is a registered AgentOS software project. Hermes VPS is the
+orchestration control plane. Autonomous software work executes on gx10-01
+through the AgentOS execution lane (`legenex/agent-os` `execution/registry.yaml`,
+lane `gx10`, path `/home/legenex/Documents/Projects/GigPilot`). Do not establish
+a long-lived application checkout on the Hermes VPS.
+
+Lifecycle: Bossman → Archie → Dexter (GX10 executor) → Bugsy → Critic → Bossman.
+No GigPilot-specific permanent profile. Human-only gates stay with Nick.
 
 ## Git
 

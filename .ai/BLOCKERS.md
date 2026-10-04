@@ -11,3 +11,4 @@
 | Contra / Fiverr | No public API; ToS forbid automation | Manual paste + forwarded-email ingestion |
 | Real-money spend | Owner must set budgets | Defaults 0 → mock/test mode |
 | DNS / public VPS | Human gate | ops/vps prepared, not deployed |
+| AI OS working-copy row | Machine token cannot mutate `allowed_roots` or approve discovery; `ai register` needs a user API token | Project `gigpilot` exists in AI OS with no locations. Source path `/home/legenex/Documents/Projects/GigPilot` reported via `/api/agent/locations/report` (200) but did not bind. Needs owner portal: Machines → gx10-01 → add allowed root `/home/legenex/Documents/Projects` → Scan now → register that path. Do not register `/srv/projects/gigpilot`. |

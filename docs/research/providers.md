@@ -77,8 +77,11 @@ or contradictory in the docs — adapters must handle both variants defensively.
 - LiteLLM gateway: host `http://127.0.0.1:4000/v1`; containers on docker network
   `gx_gateway` → `http://gx-litellm:4000/v1`. Key required (virtual key alias `gigpilot`,
   models gx-mini, gx-code, gx-auto; stored at `/srv/projects/gigpilot/secrets/gx_api_key`).
-- `gx-mini` (Qwen3.5-4B, ~52 tok/s, 2 parallel) — triage/extraction/classification.
-  `gx-code` (35B-A3B MoE, 2 nodes) — drafting/code/longer answers. `gx-auto` — cluster router.
-  **Never use `gx-max` unattended.**
+- Live-verified 2026-10-04 on this gateway with the `gigpilot` key: `gx-mini`,
+  `gx-code`, `gx-auto`. Do not invent aliases. AgentOS itself routes on
+  `gx-auto` / `gx-max`; GigPilot product inference uses this virtual key and
+  must not call `gx-max`.
+- Historical notes: `gx-mini` was cheap/short tasks; `gx-code` heavier
+  drafting. Re-check `/v1/models` before changing product defaults.
 - Gateway does not retry or fall back; clamps max_tokens; returns 429 over 32 parallel.
 - Liveness without key: `GET /health/liveliness`.

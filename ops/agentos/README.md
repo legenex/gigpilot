@@ -1,27 +1,39 @@
 # GigPilot ↔ AgentOS
 
-GigPilot is **ready to import** into Legenex AgentOS but is **not registered**
-(decision D7 in `.ai/DECISIONS.md`): importing the descriptor makes the Hermes
-project factory create a board and start work on this repository, so it
-waits for the approval owner.
+GigPilot is a registered AgentOS software project. Hermes VPS is the
+orchestration control plane. Autonomous software work executes on gx10-01
+through the AgentOS execution lane. This folder is the in-repo descriptor
+and the product supervision API contract.
 
 | File | Purpose |
 |---|---|
-| `project.yaml` | Machine-readable AgentOS descriptor (schema_version 1). Unknowns are `UNCONFIRMED`. |
+| `project.yaml` | Machine-readable AgentOS descriptor (schema_version 1). |
 | `PROJECT.md` | Human-readable companion, same facts. |
-| `README.md` | This file: how AgentOS supervises GigPilot. |
+| `README.md` | This file: how AgentOS observes GigPilot runtime. |
 
-To import later, copy this folder to AgentOS as `projects/_inbox/gigpilot/`
-(the inbox watcher runs `hermes-project-factory import`). Don't edit the AgentOS
-repository from here.
+Do not copy this folder into AgentOS as a second source of truth. The
+canonical AgentOS context lives in `legenex/agent-os` `projects/gigpilot/`.
+Reconcile through `hermes-project-factory`, not by inventing a parallel
+project, board or Buzz channel.
 
-## Supervision model
+## Surfaces (verified 2026-10-04)
 
-AgentOS has **no runtime supervision API today**: the control center is a
-read-only dashboard and the supervisor has no job registry. GigPilot therefore
-supervises its own work. Its durable orchestrator runs on pg-boss/Postgres
-inside the worker. AgentOS can observe that work in two ways, and both are
-**pull-only**:
+| Surface | Value |
+|---|---|
+| Hermes project slug | `gigpilot` |
+| Buzz | `#gigpilot` (`b79f3679-2bf2-4667-b53a-d386f7370e23`) |
+| Kanban | `gigpilot` |
+| GitHub | `legenex/gigpilot` |
+| GX10 source checkout | `/home/legenex/Documents/Projects/GigPilot` |
+| Runtime data | `/srv/projects/gigpilot` |
+| Execution lane | `gx10` |
+| Profiles | Bossman, Archie, Dexter, Bugsy, Critic |
+| Approval owner | Nick (human-only gates) |
+
+## Supervision model (product runtime)
+
+AgentOS does not drive GigPilot's pg-boss orchestrator. GigPilot supervises
+its own work. AgentOS can observe that work in two **pull-only** ways:
 
 1. **Status snapshot file:** the worker's AgentOS adapter
    (`packages/providers/src/agentos`) writes
@@ -31,8 +43,8 @@ inside the worker. AgentOS can observe that work in two ways, and both are
 2. **Supervision HTTP API:** the worker serves this API on loopback at
    `127.0.0.1:4712`. It isn't exposed to the tailnet or to the internet.
 
-A third mode is an HTTP push from GigPilot to AgentOS. It's a future
-**adapter boundary** and is off by default. It only turns on when
+A third mode is an HTTP push from GigPilot to AgentOS. It's an **adapter
+boundary** and is off by default. It only turns on when
 `AGENTOS_PUSH_ENABLED=1` and `AGENTOS_BASE_URL` are both set. The target path
 `/api/projects/gigpilot/status` is **UNCONFIRMED** because AgentOS has no such
 endpoint yet.

@@ -40,3 +40,25 @@
 | Watchdog + timers | PASS | gigpilot-backup.timer, gigpilot-watchdog.timer active; watchdog silent when healthy |
 | Tailscale | PASS | 4710 site 200; 4711 dashboard 307→login, /api/health 200 |
 | Deployed version | PASS | supervision status version = 1435fe80568b |
+
+## 2026-09-27 (operator handover, deployed cf6ae67)
+| Check | Result | Detail |
+|---|---|---|
+| Typecheck / lint / tests | PASS | 405 passed, 1 skipped; auth/admin unit tests incl. 3 new forced-change tests |
+| Dashboard production build | PASS | |
+| Playwright live first-login flow | PASS 11 steps | first login → `/set-password`, gated routes, 403 APIs, change → dashboard with `GigPilot` workspace, reload stays, logout, new-password login, old password rejected |
+| Bootstrap state restored + verified | PASS | after the live check, account restored without logging in: temp password active (credential hashing check), `must_change_password` true, 0 sessions, audit rows recorded |
+| Secret hygiene | PASS | temp password absent from repo, git history (full-history grep), env files, docs, logs, image layers; passed via stdin to the bootstrap script only |
+| Deployed version | PASS | release pointer = cf6ae673c937 = origin/main; worker ready at schema 0003_must_change_password |
+| Reboot persistence (real) | PASS | host rebooted 15:51 SAST: all 5 containers self-recovered healthy via `unless-stopped` + linger within ~2 min; /login 200, app health OK (db 1 ms), worker readyz OK, schedules fresh |
+
+## 2026-10-04 (platform integration)
+| Check | Result | Detail |
+|---|---|---|
+| Source git top-level | PASS | `/home/legenex/Documents/Projects/GigPilot` `main` `cf6ae673c937a76e33a3df7bdfdf03d23ab4218f` origin `legenex/gigpilot` |
+| Runtime dir | PASS | `/srv/projects/gigpilot` (releases/secrets/status; not a git checkout); current → `cf6ae673c937-20260927t131101z` |
+| AI OS project | PARTIAL | `gigpilot` active, repo `legenex/gigpilot`, **no working copies** |
+| `ai mcp` | PASS | initialize 2025-06-18; tools visible; use_context returned CURRENT_PRIORITIES.md |
+| GX product models | PASS | LiteLLM with gigpilot key: `gx-mini`, `gx-code`, `gx-auto` |
+| Buzz `#gigpilot` | PASS | created `b79f3679-2bf2-4667-b53a-d386f7370e23`; members verified |
+| Compose stack | FAIL | no gigpilot containers; watchdog ALERT since 2026-09-27; backup FAILED db not running |

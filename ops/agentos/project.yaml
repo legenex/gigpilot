@@ -1,20 +1,12 @@
-# Machine-readable AgentOS project descriptor — READY TO IMPORT, NOT REGISTERED.
+# Machine-readable AgentOS project descriptor.
 #
-# Follows the AgentOS convention (schema_version 1, see AgentOS
-# projects/pageflo/project.yaml and PROJECT-FACTORY-IMPORT-CONTRACT.md).
-# This is a ROUTING AND MAPPING document, not a copy of the project wiki: it
-# says where GigPilot's truth lives and how to reach its surfaces.
+# Follows the AgentOS convention (schema_version 1). This is a ROUTING AND
+# MAPPING document, not a copy of the project wiki.
 #
-# UNCONFIRMED means "nobody has established this yet" — an open question.
-# null means "genuinely not applicable to this project" — a closed one.
-# Never replace an UNCONFIRMED with a guess to make the file look complete.
+# UNCONFIRMED means nobody has established this yet. null means not applicable.
+# Never replace an UNCONFIRMED with a guess.
 #
-# Registration is deliberately deferred (GigPilot .ai/DECISIONS.md D7):
-# importing this descriptor would trigger Hermes Kanban work on the repo.
-# Import only when the approval owner decides to (copy this folder into the
-# AgentOS inbox / run `hermes-project-factory import`).
-#
-# Human-readable companion: PROJECT.md (same folder). Supervision API: README.md.
+# Human-readable companion: PROJECT.md. Supervision API: README.md.
 
 schema_version: 1
 
@@ -22,38 +14,58 @@ slug: gigpilot
 name: GigPilot
 type: software
 visibility: internal
+owner: bossman
+board: gigpilot
+board_slug: gigpilot
+repo: legenex/gigpilot
+profiles:
+  - bossman
+  - archie
+  - dexter
+  - bugsy
+  - critic
 
-outcome: "Agentic opportunity-to-delivery OS: find profitable, permitted freelance work, win it with owner-approved proposals, and deliver it through a supervised, QA-checked production pipeline. Promise: Find profitable work. Win it. Get it done."  # from the repository's AGENTS.md
-lifecycle_state: active  # greenfield build in progress (milestones 2–4 in parallel per .ai/HANDOFF.md)
-display_order: UNCONFIRMED  # AgentOS dashboard ordering not assigned
+outcome: "Agentic opportunity-to-delivery OS: find profitable, permitted freelance work, win it with owner-approved proposals, and deliver it through a supervised, QA-checked production pipeline. Promise: Find profitable work. Win it. Get it done."
+lifecycle_state: active  # internal V1 shipped 2026-09-27; AgentOS integration authorized 2026-10-04
+display_order: UNCONFIRMED
 
-context_path: projects/gigpilot/  # where the AgentOS context folder would live after import
+context_path: projects/gigpilot/
 
 buzz:
-  channel_name: UNCONFIRMED  # no Buzz channel exists or has been requested for GigPilot
-  channel_id: UNCONFIRMED
+  channel_name: "#gigpilot"
+  channel_id: b79f3679-2bf2-4667-b53a-d386f7370e23  # created 2026-10-04 as bossman; search confirmed unique
   visibility: internal
 
-kanban_board: UNCONFIRMED  # no Hermes board yet — creating one is exactly what registration would do (D7)
+kanban_board: gigpilot
 
 repository:
-  url: https://github.com/legenex/gigpilot  # from `git remote -v` of the gx10-01 checkout; repo is PUBLIC
-  local_path: /home/legenex/Documents/Projects/GigSmith  # gx10-01 development checkout (directory name predates the product name)
-  agents_md_path: AGENTS.md  # canonical engineering contract; higher-priority repository truth than this file
+  url: https://github.com/legenex/gigpilot  # public; origin of the gx10-01 checkout
+  branch: main
+  source_of_truth: github
+  execution_host: gx10-01
+  execution_user: legenex
+  execution_path: /home/legenex/Documents/Projects/GigPilot
+  worktree_root: /home/legenex/Documents/Projects/.agent-worktrees
+  mac_path: null
+  agents_md_path: AGENTS.md
+  local_path: /home/legenex/Documents/Projects/GigPilot  # factory/legacy field; not /srv/projects/gigpilot
 
 control_tower:
-  # Project Control Tower duty is context loaded into an existing permanent
-  # specialist — never a new per-project profile.
-  profile: UNCONFIRMED  # archie is the convention for software projects; not yet assigned
-  contract_path: UNCONFIRMED  # projects/gigpilot/CONTROL-TOWER.md would be created at import
+  profile: archie
+  contract_path: projects/gigpilot/CONTROL-TOWER.md
 
-primary_profiles: UNCONFIRMED  # expected software lifecycle Bossman → Archie → Dexter → Bugsy → Critic, not yet assigned
+primary_profiles:
+  - bossman
+  - archie
+  - dexter
+  - bugsy
+  - critic
 
-approval_owner: UNCONFIRMED  # human-only gates are listed in the repo's AGENTS.md; the named AgentOS approval owner is not recorded
+approval_owner: Nick  # human-only gates in repo AGENTS.md
 source_of_truth: repository
 
 sources:
-  current_state: .ai/HANDOFF.md  # repository-relative
+  current_state: .ai/HANDOFF.md
   roadmap: .ai/PLAN.md
   architecture: docs/ARCHITECTURE.md
   specification: AGENTS.md
@@ -65,8 +77,8 @@ sources:
   artifacts: []
 
 notes:
-  - "Runtime (gx10-01): ports 4710 web, 4711 app, 4712 worker health + supervision (loopback), 4715 postgres (loopback); dev 4720–4722; runtime dir /srv/projects/gigpilot. Status snapshot written atomically to /srv/projects/gigpilot/status/agentos.json. Supervision API: http://127.0.0.1:4712/api/supervision/* (bearer AGENTOS_SUPERVISION_TOKEN) — see ops/agentos/README.md in the repo."
-  - "NOT REGISTERED in AgentOS (GigPilot decision D7). This descriptor is prepared so import is a copy, not a discovery exercise."
-  - "AgentOS has no runtime supervision API today; GigPilot runs its own durable orchestrator (pg-boss) and exposes a PULL-ONLY, token-protected supervision API on the worker (127.0.0.1:4712). Push (AgentOS HTTP) is an adapter boundary, off by default."
-  - "Human-only gates (never automated): OAuth/MFA logins, real credentials, enabling real-money spend, anything sent to real clients, marketplace submissions (always behind owner approval), pricing/legal commitments, DNS, destructive production-data actions."
+  - "Runtime (gx10-01): ports 4710 web, 4711 app, 4712 worker health + supervision (loopback), 4715 postgres (loopback); dev 4720–4722; runtime dir /srv/projects/gigpilot (NOT the git checkout). Status snapshot /srv/projects/gigpilot/status/agentos.json. Supervision API: http://127.0.0.1:4712/api/supervision/* (bearer AGENTOS_SUPERVISION_TOKEN)."
+  - "Software execution: AgentOS lane gx10 at /home/legenex/Documents/Projects/GigPilot. Hermes VPS is control plane only."
+  - "D7 (defer AgentOS registration) was superseded 2026-10-04 by owner instruction to integrate with AgentOS, Hermes, Buzz and AI OS."
+  - "Human-only gates (never automated): OAuth/MFA, real credentials, enabling real-money spend, anything sent to real clients, marketplace submissions, pricing/legal commitments, DNS, destructive production-data actions, repository visibility changes."
   - "Shared host rules: only Docker resources prefixed gigpilot; ports 4710–4729 only; never bind 0.0.0.0; never use gx-max."
