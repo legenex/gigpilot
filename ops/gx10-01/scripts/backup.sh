@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Dumps the GigPilot database (pg_dump custom format, verified with
-# pg_restore --list) and archives the asset storage volume into
-# /srv/projects/gigpilot/backups (0700). gx-backup's nightly restic snapshot of
-# /srv/projects picks these up (encrypted, cross-node copy).
+# Dumps the GigPilot database (pg_dump custom format; refuses a database with no
+# user tables and a dump whose pg_restore --list has no TABLE DATA entries) and
+# archives the asset storage volume into /srv/projects/gigpilot/backups (0700).
+# gx-backup's nightly restic snapshot of /srv/projects picks these up (encrypted,
+# cross-node copy).
 #   backup.sh                   nightly backup (keeps GIGPILOT_BACKUP_KEEP, default 14)
 #   backup.sh --label predeploy pre-deploy backup (keeps 5)
 # With the stack down, the database is dumped "cold" from a throwaway copy of the
@@ -22,6 +23,18 @@ trap cleanup EXIT
 
 fail() { echo "backup FAILED: $*" >&2; echo "$TS backup FAILED ($LABEL): $*" >> "$RT/notes/backups.log"; exit 1; }
 
+# One backup at a time: the stale-resource sweep below must never remove the disposable
+# container of a run that is still going.
+exec 9>"$DEST/.backup.lock"
+flock -n 9 || fail "another backup.sh run holds $DEST/.backup.lock"
+
+# Every disposable container and volume of the cold path carries this label. Remove ones
+# left by an earlier run that was killed before its EXIT trap ran; nothing without the
+# label is touched.
+COLD_LABEL=gigpilot.backup.cold=1
+docker ps -aq --filter "label=$COLD_LABEL" | xargs -r docker rm -f >/dev/null
+docker volume ls -q --filter "label=$COLD_LABEL" | xargs -r docker volume rm >/dev/null
+
 DB_CTR=gigpilot-db-1
 MODE=live
 if ! docker ps --format '{{.Names}}' | grep -qx gigpilot-db-1; then
@@ -35,11 +48,18 @@ if ! docker ps --format '{{.Names}}' | grep -qx gigpilot-db-1; then
   DB_CTR="gigpilot-backup-cold-$TS"
   cold_cleanup() { docker rm -f "$DB_CTR" >/dev/null 2>&1 || true; docker volume rm "$DB_CTR" >/dev/null 2>&1 || true; }
   trap 'cleanup; cold_cleanup' EXIT
-  docker volume create "$DB_CTR" >/dev/null
-  docker run --rm --network none -v gigpilot_pgdata:/src:ro -v "$DB_CTR":/dst postgres:17-bookworm \
+  docker volume create --label "$COLD_LABEL" "$DB_CTR" >/dev/null
+  docker run --rm --network none --label "$COLD_LABEL" -v gigpilot_pgdata:/src:ro -v "$DB_CTR":/dst postgres:17-bookworm \
     sh -c 'cp -a /src/. /dst/ && test "$(cat /dst/pgdata/PG_VERSION)" = 17 && test ! -e /dst/pgdata/postmaster.pid' \
     || fail "cold copy of gigpilot_pgdata failed (or it is not a cleanly stopped Postgres 17 cluster)"
-  docker run -d --name "$DB_CTR" --network none -e PGDATA=/var/lib/postgresql/data/pgdata \
+  # Close the window between the in-use check and the copy: nothing may have mounted the
+  # volume meanwhile, and the copy itself must be a cleanly shut down cluster.
+  [ -z "$(docker ps -q --filter volume=gigpilot_pgdata)" ] || fail "gigpilot_pgdata was mounted by another container during the cold copy"
+  CTL="$(docker run --rm --network none --label "$COLD_LABEL" -v "$DB_CTR":/dst:ro postgres:17-bookworm \
+    pg_controldata /dst/pgdata)" || fail "pg_controldata failed on the cold copy of gigpilot_pgdata"
+  grep -Eq '^Database cluster state:[[:space:]]+shut down$' <<< "$CTL" \
+    || fail "cold copy of gigpilot_pgdata is not a cleanly shut down cluster (pg_controldata)"
+  docker run -d --name "$DB_CTR" --label "$COLD_LABEL" --network none -e PGDATA=/var/lib/postgresql/data/pgdata \
     -v "$DB_CTR":/var/lib/postgresql/data postgres:17-bookworm >/dev/null || fail "cold Postgres did not start"
   for _ in $(seq 60); do
     docker exec "$DB_CTR" pg_isready -q -U gigpilot -d gigpilot 2>/dev/null && break
@@ -48,11 +68,19 @@ if ! docker ps --format '{{.Names}}' | grep -qx gigpilot-db-1; then
   docker exec "$DB_CTR" pg_isready -q -U gigpilot -d gigpilot || fail "cold Postgres not ready after 60 s"
 fi
 
+# Never record an empty database as a good backup (893-byte dumps of an empty database
+# used to pass pg_restore --list).
+TABLES="$(docker exec "$DB_CTR" psql -U gigpilot -d gigpilot -Atc 'select count(*) from pg_stat_user_tables')" \
+  || fail "could not count user tables ($MODE)"
+[[ "$TABLES" =~ ^[0-9]+$ && "$TABLES" -gt 0 ]] || fail "database gigpilot has no user tables ($MODE)"
+
 DB_FILE="$DEST/gigpilot-db-$LABEL-$TS.dump"
 docker exec "$DB_CTR" pg_dump -U gigpilot -d gigpilot -Fc > "$DB_FILE.partial" || fail "pg_dump failed ($MODE)"
-docker exec -i "$DB_CTR" pg_restore --list < "$DB_FILE.partial" > /dev/null || fail "dump did not verify (pg_restore --list)"
+TOC="$(docker exec -i "$DB_CTR" pg_restore --list < "$DB_FILE.partial")" || fail "dump did not verify (pg_restore --list)"
+DATA_ENTRIES="$(grep -c ' TABLE DATA ' <<< "$TOC" || true)"
+(( DATA_ENTRIES > 0 )) || fail "dump has no TABLE DATA entries ($MODE)"
 mv "$DB_FILE.partial" "$DB_FILE"
-echo "db backup ($MODE): $DB_FILE ($(stat -c %s "$DB_FILE") bytes)"
+echo "db backup ($MODE): $DB_FILE ($(stat -c %s "$DB_FILE") bytes, $TABLES user tables, $DATA_ENTRIES TABLE DATA entries)"
 
 if docker volume inspect gigpilot_storage >/dev/null 2>&1; then
   ST_FILE="$DEST/gigpilot-storage-$LABEL-$TS.tgz"
