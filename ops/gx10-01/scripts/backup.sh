@@ -18,22 +18,24 @@ case "$LABEL" in nightly) KEEP="${GIGPILOT_BACKUP_KEEP:-14}" ;; *) KEEP="${GIGPI
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
 umask 077
 mkdir -p "$DEST" "$RT/notes"
-cleanup() { rm -f "$DEST"/*.partial; }
-trap cleanup EXIT
-
 fail() { echo "backup FAILED: $*" >&2; echo "$TS backup FAILED ($LABEL): $*" >> "$RT/notes/backups.log"; exit 1; }
 
 # One backup at a time: the stale-resource sweep below must never remove the disposable
 # container of a run that is still going.
 exec 9>"$DEST/.backup.lock"
 flock -n 9 || fail "another backup.sh run holds $DEST/.backup.lock"
+# Installed only once the lock is held: a run that loses the lock must not delete the
+# .partial files of the run that holds it.
+cleanup() { rm -f "$DEST"/*.partial; }
+trap cleanup EXIT
 
 # Every disposable container and volume of the cold path carries this label. Remove ones
 # left by an earlier run that was killed before its EXIT trap ran; nothing without the
 # label is touched.
 COLD_LABEL=gigpilot.backup.cold=1
-docker ps -aq --filter "label=$COLD_LABEL" | xargs -r docker rm -f >/dev/null
-docker volume ls -q --filter "label=$COLD_LABEL" | xargs -r docker volume rm >/dev/null
+{ docker ps -aq --filter "label=$COLD_LABEL" | xargs -r docker rm -f >/dev/null \
+  && docker volume ls -q --filter "label=$COLD_LABEL" | xargs -r docker volume rm >/dev/null; } \
+  || fail "stale cold-resource sweep failed (docker unreachable, or a labelled volume is still in use)"
 
 DB_CTR=gigpilot-db-1
 MODE=live
